@@ -32,3 +32,23 @@ Terraform version is pinned in `.terraform-version` (tfenv). Commit `.terraform.
 - No secrets, subscription or tenant IDs, IPs or object IDs in committed files or variable defaults.
 - Never run `terraform apply` or `destroy` without showing the plan first.
 - Region: Sweden Central by default (operator repo ADR-0016: cheapest EU node, OpenAI and Anthropic models). Every root takes `location` as a variable.
+
+## Working agreement
+
+- Every change goes through a branch and a pull request; `main` is protected by a ruleset (required checks,
+  squash merge, no force push). Keep pull requests small and say why in the description.
+- Run `terraform fmt -check -recursive`, `terraform validate` and a `plan` locally before opening a pull request, and add or update tests in the same pull request.
+- Leave the code safer than you found it: when you notice a security or reliability problem nearby, fix it
+  or raise it in the pull request, do not ignore it.
+- Prefer boring, well-known solutions and the project's existing patterns over new dependencies or clever code.
+
+## Engineering and security practices
+
+- Pin provider versions (`~>` on a minor line) and commit `.terraform.lock.hcl`; never use unpinned modules.
+- Least privilege: the narrowest scope and the narrowest built-in role; data-plane access through Entra ID
+  only, local auth and shared keys disabled.
+- Network: public endpoints only with IP rules or authorized ranges; no `0.0.0.0/0`.
+- Stateful resources (state storage, Key Vault, analysis records) keep soft delete, versioning or locks; a
+  plan that replaces or destroys them needs an explicit note in the pull request.
+- Sensitive values only as `sensitive = true` variables or outputs, never in defaults, descriptions or tags.
+- Prefer native Azure features over extra resources; every new resource gets a price check first.
