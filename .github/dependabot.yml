@@ -1,0 +1,31 @@
+# Weekly dependency updates. Titles follow Conventional Commits (chore(deps), ci(deps)) so they pass the
+# PR title check. A human reviews every update and runs the plan before any apply.
+version: 2
+updates:
+  - package-ecosystem: terraform
+    directories: [/bootstrap, /foundation, /lab]
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      providers:
+        patterns: ["*"]
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
