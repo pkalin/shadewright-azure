@@ -49,7 +49,13 @@ resource "azurerm_log_analytics_workspace" "audit" {
   sku                          = "PerGB2018"
   retention_in_days            = 90
   local_authentication_enabled = false # Entra ID only
-  tags                         = var.tags
+  # Diagnostic settings deliver over a private Microsoft channel that these switches do not control, so public
+  # ingestion is off. Queries stay public: a workspace has no IP rules, and the only alternative is Azure
+  # Monitor Private Link (a private endpoint, about EUR 7/month, and a client inside the VNet). Reading needs
+  # Entra ID and an RBAC role on the workspace.
+  internet_ingestion_access_type = "Disabled"
+  internet_query_access_type     = "Enabled"
+  tags                           = var.tags
 }
 
 resource "azurerm_monitor_diagnostic_setting" "keyvault_audit" {
