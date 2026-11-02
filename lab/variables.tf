@@ -50,8 +50,8 @@ variable "analyzer_service_account" {
 
 variable "executor_service_account" {
   type        = string
-  description = "The remediation controller's ServiceAccount (Kubebuilder's default name)."
-  default     = "shadewright-controller-manager"
+  description = "The executor's ServiceAccount, as the operator's config/ deploys it."
+  default     = "shadewright-executor"
 }
 
 variable "flux_enabled" {
