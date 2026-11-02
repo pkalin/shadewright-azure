@@ -33,6 +33,19 @@ Terraform version is pinned in `.terraform-version` (tfenv). Commit `.terraform.
 - Never run `terraform apply` or `destroy` without showing the plan first.
 - Region: Sweden Central by default (operator repo ADR-0016: cheapest EU node, OpenAI and Anthropic models). Every root takes `location` as a variable.
 
+## Commits
+
+Every commit on `main` follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+`type(scope)!: summary`. Pull requests are squash-merged with the pull request title as the commit message,
+so the **pull request title** is what counts; a required check (`Conventional PR title`) validates it.
+
+- Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`, `revert`.
+- Scope is optional; when used it is one of: `bootstrap`, `foundation`, `lab`, `scripts`, `docs`, `ci`, `deps`.
+- Summary in English, imperative, starting lower case, no full stop: `feat(policy): refuse decreases by default`.
+- `!` after the type or scope, plus a `BREAKING CHANGE:` footer in the description, for incompatible changes
+  (API fields, CRD schema, flags, Helm values).
+- This repository is not released; the convention keeps the history readable and consistent with the operator.
+
 ## Working agreement
 
 - Every change goes through a branch and a pull request; `main` is protected by a ruleset (required checks,
