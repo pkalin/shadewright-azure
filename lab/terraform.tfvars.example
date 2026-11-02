@@ -1,0 +1,11 @@
+subscription_id = "00000000-0000-0000-0000-000000000000"
+prefix          = "shadewright"
+admin_ip_cidrs  = ["203.0.113.10/32"]
+
+state_backend = {
+  resource_group_name  = "rg-shadewright-tfstate"
+  storage_account_name = "stshadewrighttfxxxxxx"
+  container_name       = "tfstate"
+}
+
+# flux_enabled = true   # once the fleet repo has clusters/lab

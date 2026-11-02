@@ -1,0 +1,51 @@
+# Terraform working data
+.terraform/
+.terraform.tfstate.lock.info
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfplan.json
+plan.json
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+.tflint.d/
+.infracost/
+# Provider lock files ARE committed
+!.terraform.lock.hcl
+
+# Local, environment-specific values (subscription, tenant, IPs)
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+backend.hcl
+!backend.hcl.example
+.env
+.env.*
+!.env.example
+
+# Credentials that must never land here (the GitHub App key goes straight into Key Vault, ADR-0006)
+*.pem
+*.key
+*.pfx
+*.p12
+*.kubeconfig
+kubeconfig*
+.azure/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local agent notes
+CLAUDE.local.md
+.claude/settings.local.json

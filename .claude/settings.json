@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(terraform fmt*)",
+      "Bash(terraform validate*)",
+      "Bash(terraform init*)",
+      "Bash(terraform plan*)",
+      "Bash(terraform output*)",
+      "Bash(terraform providers*)"
+    ],
+    "ask": [
+      "Bash(terraform apply*)",
+      "Bash(terraform destroy*)",
+      "Bash(terraform import*)",
+      "Bash(terraform state *)",
+      "Bash(terraform force-unlock*)",
+      "Bash(az * create*)",
+      "Bash(az * delete*)",
+      "Bash(az * update*)",
+      "Bash(az * set*)",
+      "Bash(git push*)"
+    ]
+  }
+}
