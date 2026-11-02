@@ -37,3 +37,28 @@ resource "azurerm_role_assignment" "kv_crypto_user_executor" {
   role_definition_name = "Key Vault Crypto User"
   principal_id         = azurerm_user_assigned_identity.executor.principal_id
 }
+
+# Every use of the App key is recorded (ADR-0006): the AuditEvent category, with operation `Sign` for each
+# JWT, goes to a small Log Analytics workspace that outlives the lab. Query it with KQL (AZKVAuditLogs table).
+# Price (Azure Retail Prices API, swedencentral, 2026-11-02): ingestion 2.99 USD/GB, retention beyond the
+# included 31 days 0.13 USD/GB/month. A signing about once an hour is a few KB a month, so about 0.
+resource "azurerm_log_analytics_workspace" "audit" {
+  name                         = "log-${var.prefix}-${local.suffix}"
+  location                     = azurerm_resource_group.this.location
+  resource_group_name          = azurerm_resource_group.this.name
+  sku                          = "PerGB2018"
+  retention_in_days            = 90
+  local_authentication_enabled = false # Entra ID only
+  tags                         = var.tags
+}
+
+resource "azurerm_monitor_diagnostic_setting" "keyvault_audit" {
+  name                           = "audit-to-log-analytics"
+  target_resource_id             = azurerm_key_vault.this.id
+  log_analytics_workspace_id     = azurerm_log_analytics_workspace.audit.id
+  log_analytics_destination_type = "Dedicated"
+
+  enabled_log {
+    category = "AuditEvent"
+  }
+}
