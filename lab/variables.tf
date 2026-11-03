@@ -56,8 +56,8 @@ variable "executor_service_account" {
 
 variable "flux_enabled" {
   type        = bool
-  description = "Install Flux and point it at clusters/lab in the fleet repository."
-  default     = true
+  description = "Install Flux and point it at clusters/lab in the fleet repository. Off by default, so nobody syncs a repository they did not choose: set it together with fleet_repository_url."
+  default     = false
 }
 
 variable "fleet_repository_url" {

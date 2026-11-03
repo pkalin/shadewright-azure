@@ -76,8 +76,8 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
 ## Lab session
 
 The `lab` root reads the foundation's outputs from its state and creates the AKS cluster, the federated
-credentials of both identities and Flux pointed at `clusters/lab` in the fleet repository (set
-`flux_enabled = false` for a bare cluster). Apply it for a session and destroy it after: the node is the main
+credentials of both identities and, with `flux_enabled = true` and `fleet_repository_url` set to your own copy of
+the fleet repository, Flux pointed at its `clusters/lab` (off by default: a bare cluster). Apply it for a session and destroy it after: the node is the main
 cost. Once, fill in the variables:
 
 ```bash

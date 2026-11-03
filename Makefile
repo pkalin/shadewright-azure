@@ -1,10 +1,11 @@
 # Lab session commands (README, "Lab session"). The logic, and the confirmation before any apply, is in
 # scripts/lab.sh; these targets only name it. Nothing here touches foundation or bootstrap.
 SHELL := bash
+# GNU Make 3.81 (macOS) ignores .SHELLFLAGS, so recipes also exit on their own errors.
 .SHELLFLAGS := -euo pipefail -c
 ROOTS := bootstrap foundation lab
 
-.PHONY: help lab-plan lab-up lab-down lab-cost lab-check check
+.PHONY: help lab-plan lab-up lab-down lab-cost lab-check check test
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -27,6 +28,9 @@ lab-check: ## List what is left in the subscription; fails while lab resources r
 check: ## terraform fmt and validate for every root, as CI runs them (no backend, no cloud)
 	terraform fmt -check -recursive
 	for r in $(ROOTS); do \
-	  terraform -chdir=$$r init -backend=false -input=false -lockfile=readonly >/dev/null; \
-	  terraform -chdir=$$r validate; \
+	  terraform -chdir=$$r init -backend=false -input=false -lockfile=readonly >/dev/null || exit 1; \
+	  terraform -chdir=$$r validate || exit 1; \
 	done
+
+test: ## Offline tests of the lab script (no Terraform, no Azure)
+	scripts/lab_test.sh

@@ -13,7 +13,7 @@
 # the confirmation: up and down need a terminal and a typed "yes".
 set -euo pipefail
 
-repo=${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 lab_dir="$repo/lab"
 lab_tfvars="$lab_dir/terraform.tfvars"
 backend="$repo/backend.hcl"
@@ -31,10 +31,11 @@ usage() { sed -n '2,13s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 need() { for c in "$@"; do command -v "$c" >/dev/null || die "$c is not installed"; done; }
 
-# Value of `key = "string"` or `key = number` in a tfvars file; empty when absent or commented out.
+# Value of a top-level `key = "string"` or `key = number` in a tfvars file (not one nested in a block); empty
+# when absent or commented out.
 tfvar() {
   [[ -f $1 ]] || return 0
-  sed -n -E "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*\"?([^\"#[:space:]]*)\"?.*/\1/p" "$1" | head -n 1
+  sed -n -E "s/^$2[[:space:]]*=[[:space:]]*\"?([^\"#[:space:]]*)\"?.*/\1/p" "$1" | head -n 1
 }
 
 # Default of a variable in a root's variables.tf, so the defaults have one source.
@@ -60,7 +61,8 @@ lab_config() {
   prefix=$(tfvar "$lab_tfvars" prefix)
   state_rg=$(tfvar "$backend" resource_group_name)
   [[ $subscription =~ ^[0-9a-fA-F-]{36}$ ]] || die "subscription_id in lab/terraform.tfvars is not a GUID"
-  [[ $prefix =~ ^[a-z0-9-]+$ ]] || die "prefix in lab/terraform.tfvars must be lower-case letters, digits or -"
+  # The same rule as foundation/variables.tf, so the group names below are the ones Terraform built.
+  [[ $prefix =~ ^[a-z0-9]{1,11}$ ]] || die "prefix in lab/terraform.tfvars must be 1 to 11 lower-case letters or digits"
   [[ -n $state_rg ]] || die "resource_group_name missing in backend.hcl"
   # Names as lab/main.tf, lab/aks.tf and foundation/main.tf build them.
   lab_rg="rg-$prefix-lab-aks"
@@ -104,7 +106,8 @@ price() {
   local -a args=(-G --data-urlencode "currencyCode=$currency" --data-urlencode "\$filter=$1")
   while [[ -n $url ]]; do
     # --retry covers 429: the API rate-limits bursts of anonymous calls.
-    page=$(curl -fsS --max-time 20 --retry 4 --retry-delay 3 "${args[@]}" "$url") ||
+    # ${args[@]+...}: bash 3.2 (macOS) treats an empty array as unset under set -u.
+    page=$(curl -fsS --max-time 20 --retry 4 --retry-delay 3 ${args[@]+"${args[@]}"} "$url") ||
       { printf 'lab: Retail Prices API request failed\n' >&2; return 1; }
     out=$(jq -r "[.Items[] | $2 | .retailPrice] | first // empty" <<<"$page")
     [[ -n $out ]] && { printf '%s' "$out"; return 0; }
@@ -168,7 +171,7 @@ cmd_check() {
   jq -r -n --argjson groups "$groups" --argjson res "$resources" \
     --arg lab "$lab_rg" --arg nodes "$node_rg" --arg foundation "$foundation_rg" --arg state "$state_rg" '
     # Types billed by the hour whatever group they are in: none belongs outside a running lab.
-    def hourly: test("^Microsoft\\.(Compute/(virtualMachines|virtualMachineScaleSets|disks|snapshots)|ContainerService/managedClusters|Network/(publicIPAddresses|loadBalancers|natGateways|bastionHosts|applicationGateways|azureFirewalls|virtualNetworkGateways))$"; "i");
+    def hourly: test("^Microsoft\\.(Compute/(virtualMachines|virtualMachineScaleSets|disks|snapshots)|ContainerService/managedClusters|Network/(publicIPAddresses|loadBalancers|natGateways|bastionHosts|applicationGateways|azureFirewalls|virtualNetworkGateways|privateEndpoints|vpnGateways|expressRouteGateways|virtualHubs|ddosProtectionPlans|dnsResolvers)|ContainerRegistry/registries)$"; "i");
     def kind($g): ($g | ascii_downcase) as $l
       | if $l == ($lab | ascii_downcase) or $l == ($nodes | ascii_downcase) or ($l | startswith("mc_" + ($lab | ascii_downcase))) then "lab"
         elif $l == ($foundation | ascii_downcase) then "foundation"
@@ -216,16 +219,17 @@ cmd_up() {
   info "terraform plan (lab) to $plan"
   tf plan -input=false -detailed-exitcode -out="$plan" || rc=$?
   case $rc in
-    0) printf '\nThe lab is up to date: nothing to apply.\n'; rm -f "$lab_dir/$plan"; return 0 ;;
+    0) printf '\nThe lab is up to date: nothing to apply.\n'; return 0 ;;
     2) ;;
-    *) rm -f "$lab_dir/$plan"; die "terraform plan failed" ;;
+    *) die "terraform plan failed" ;;
   esac
   plan_summary "$plan"
-  cmd_cost || printf 'lab: price lookup failed, check the README cost table\n' >&2
+  # A subshell, because cmd_cost exits through die: a price lookup failure only warns.
+  (cmd_cost) || printf 'lab: price lookup failed, check the README cost table\n' >&2
   confirm "Apply exactly this plan to the lab?"
   info "terraform apply $plan"
-  tf apply -input=false "$plan"
-  rm -f "$lab_dir/$plan"
+  tf apply -input=false "$plan" ||
+    die "terraform apply failed: parts of the lab may be up and billed; run make lab-down or make lab-check"
   cat <<'EOF'
 
 The lab is up and costs money by the hour. Get a kubeconfig, and destroy it when done:
@@ -243,21 +247,28 @@ cmd_down() {
   info "terraform plan -destroy (lab only) to $plan"
   tf plan -destroy -input=false -detailed-exitcode -out="$plan" || rc=$?
   case $rc in
-    0) printf '\nNothing to destroy in the lab state.\n'; rm -f "$lab_dir/$plan" ;;
+    0) printf '\nNothing to destroy in the lab state.\n' ;;
     2)
       plan_summary "$plan"
       confirm "Destroy the lab (foundation and bootstrap stay)?"
       info "terraform apply $plan (destroy)"
-      tf apply -input=false "$plan"
-      rm -f "$lab_dir/$plan"
+      if ! tf apply -input=false "$plan"; then
+        printf 'lab: the destroy failed; what is left:\n' >&2
+        cmd_check || true
+        die "terraform apply (destroy) failed: run make lab-down again"
+      fi
       ;;
-    *) rm -f "$lab_dir/$plan"; die "terraform plan -destroy failed" ;;
+    *) die "terraform plan -destroy failed" ;;
   esac
   cmd_check
 }
 
+# Sourced by scripts/lab_test.sh for the helpers only.
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
 umask 077 # saved plans hold the planned values in clear text
 tmp=$(mktemp -d)
+# The only cleanup of the saved plans, on every exit.
 trap 'rm -rf "$tmp"; rm -f "$lab_dir/lab-up.tfplan" "$lab_dir/lab-down.tfplan"' EXIT
 
 case ${1:-help} in
