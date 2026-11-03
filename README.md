@@ -92,7 +92,9 @@ terraform -chdir=lab destroy
 
 ## Checks
 
-Every pull request runs two workflows; their checks are required in the `main` ruleset:
+Every pull request runs these workflows. `PR title` is required in the `main` ruleset; the four Terraform
+checks become required once the maintainer adds them to the ruleset (until then a failing check does not block a
+merge). CodeQL (`Analyze (actions)`) also runs on every pull request.
 
 - `PR title`: the title follows Conventional Commits (see `AGENTS.md`, "Commits").
 - `Terraform`: `terraform fmt -check -recursive`, then `terraform init -backend=false -lockfile=readonly` and
@@ -100,11 +102,18 @@ Every pull request runs two workflows; their checks are required in the `main` r
   It needs no cloud credentials and never reads the state.
 
 CI runs on Linux, so every `.terraform.lock.hcl` must hold hashes for `linux_amd64` as well as your platform.
-After `init -upgrade` or a provider change, refresh them in the root you changed:
+The three roots pin the same provider versions (`lab` has no `random`). After `init -upgrade` or a provider
+change, refresh all three, so they stay on the same versions:
 
 ```bash
-terraform -chdir=<root> providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=darwin_amd64
+for r in bootstrap foundation lab; do
+  terraform -chdir=$r providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=darwin_amd64
+done
 ```
+
+`init` and `validate` start the provider binaries the lock files name, so a pull request from a fork runs code it
+chose on a GitHub runner (read-only token, no secrets). Keep "Require approval for all external contributors" on
+for Actions in the repository settings.
 
 `plan` stays local. It needs the state, and the state account and Key Vault admit only `admin_ip_cidrs`,
 so a GitHub-hosted runner cannot reach them without opening the firewalls (or paying for a runner inside

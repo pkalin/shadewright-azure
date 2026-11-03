@@ -12,7 +12,8 @@ permissions: {}
 
 concurrency:
   group: terraform-${{ github.ref }}
-  cancel-in-progress: true
+  # A newer push to a pull request replaces its run; runs on main always finish, one per commit.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   fmt:
@@ -38,10 +39,13 @@ jobs:
 
       - name: Check formatting
         run: |
-          terraform fmt -check -recursive -diff || {
-            echo "::error::Terraform files are not formatted: run 'terraform fmt -recursive' and commit the result"
-            exit 1
-          }
+          rc=0
+          terraform fmt -check -recursive -diff || rc=$?
+          case "$rc" in
+            0) ;;
+            3) echo "::error::Terraform files are not formatted: run 'terraform fmt -recursive' and commit the result"; exit 1 ;;
+            *) echo "::error::terraform fmt failed (exit $rc), most likely an HCL syntax error: see the log above"; exit 1 ;;
+          esac
 
   validate:
     name: terraform validate (${{ matrix.root }})

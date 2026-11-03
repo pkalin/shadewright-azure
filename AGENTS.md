@@ -22,7 +22,8 @@ terraform plan -out=x.tfplan                      # read it: no surprise destroy
 terraform apply x.tfplan && rm x.tfplan
 ```
 
-Terraform version is pinned in `.terraform-version` (tfenv). Commit `.terraform.lock.hcl`.
+Terraform version is pinned in `.terraform-version` (tfenv). Commit `.terraform.lock.hcl`, with hashes for
+`linux_amd64` (CI) as well as the macOS platforms, the same provider versions in all three roots (README, "Checks").
 
 ## Rules
 
