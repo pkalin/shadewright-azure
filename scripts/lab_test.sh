@@ -39,8 +39,12 @@ prefix_ok() { [[ $1 =~ ^[a-z0-9]{1,11}$ ]] && echo yes || echo no; }
 eq "prefix rule accepts foundation's form" "$(prefix_ok shw1)" yes
 eq "prefix rule refuses a hyphen" "$(prefix_ok my-lab)" no
 eq "prefix rule refuses 12 characters" "$(prefix_ok abcdefghijkl)" no
-grep -q 'prefix =~ ^\[a-z0-9\]{1,11}\$' "$here/lab.sh" && grep -q 'regex("^\[a-z0-9\]{1,11}\$"' "$here/../foundation/variables.tf" &&
-  eq "lab.sh and foundation use the same prefix rule" yes yes || eq "lab.sh and foundation use the same prefix rule" no yes
+same=no
+if grep -q 'prefix =~ ^\[a-z0-9\]{1,11}\$' "$here/lab.sh" &&
+  grep -q 'regex("^\[a-z0-9\]{1,11}\$"' "$here/../foundation/variables.tf"; then
+  same=yes
+fi
+eq "lab.sh and foundation use the same prefix rule" "$same" yes
 
 # An empty array expands under set -u in bash 3.2 only with the ${a[@]+...} form price() uses.
 empty=()
