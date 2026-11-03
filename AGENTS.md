@@ -58,7 +58,8 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 ## Engineering and security practices
 
 - Pin provider versions (`~>` on a minor line) and commit `.terraform.lock.hcl`; never use unpinned modules.
-- Least privilege: the narrowest scope and the narrowest built-in role; data-plane access through Entra ID
+- Least privilege: the narrowest scope and the narrowest built-in role, or a custom role when no built-in one is
+  narrow enough (the executor's sign-only role on the App key); data-plane access through Entra ID
   only, local auth and shared keys disabled.
 - Network: public endpoints only with IP rules or authorized ranges; no `0.0.0.0/0`.
 - Stateful resources (state storage, Key Vault, analysis records) keep soft delete, versioning or locks; a

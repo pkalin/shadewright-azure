@@ -113,14 +113,3 @@ variable "github_app_key_imported" {
   description = "Set to true once the GitHub App key is imported (README \"GitHub App key\"): grants the executor sign on it."
   default     = false
 }
-
-variable "github_app_key_name" {
-  type        = string
-  description = "Name of the GitHub App key in Key Vault."
-  default     = "github-app"
-
-  validation {
-    condition     = can(regex("^[0-9A-Za-z-]{1,127}$", var.github_app_key_name))
-    error_message = "A Key Vault key name has 1 to 127 letters, digits and hyphens."
-  }
-}

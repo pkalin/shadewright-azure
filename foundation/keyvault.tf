@@ -35,9 +35,12 @@ resource "azurerm_role_assignment" "kv_crypto_officer_admin" {
 # The executor signs the App JWT with the key and may do nothing else (ADR-0006): a custom role whose only
 # data action is sign, assigned at the scope of the one key. The built-in Crypto User would also allow read,
 # update, backup, encrypt, decrypt, wrap, unwrap and verify, on every key in the vault.
+# The definition is assignable in the resource group (Microsoft advises against single-resource assignable
+# scopes, each counts against the tenant's 5,000 custom roles); the assignment below is what narrows it to the key.
+# Price: none, Azure RBAC has no meter (2026-11-03).
 resource "azurerm_role_definition" "kv_sign_only" {
   name        = "Shadewright Key Vault Signer (${local.name}-${local.suffix})"
-  scope       = azurerm_key_vault.this.id
+  scope       = azurerm_resource_group.this.id
   description = "Sign with a Key Vault key. No read of key attributes, no other key operation."
 
   permissions {
@@ -45,15 +48,16 @@ resource "azurerm_role_definition" "kv_sign_only" {
     data_actions = ["Microsoft.KeyVault/vaults/keys/sign/action"]
   }
 
-  assignable_scopes = [azurerm_key_vault.this.id]
+  assignable_scopes = [azurerm_resource_group.this.id]
 }
 
 # The key is imported by hand after the first apply (README "GitHub App key"), so this assignment waits for
-# github_app_key_imported. Until then the executor has no access to the vault at all.
+# github_app_key_imported. Until then the executor has no access to the vault at all. A brand-new definition can
+# take a moment to propagate: if the assignment fails with RoleDefinitionDoesNotExist, apply again.
 resource "azurerm_role_assignment" "kv_sign_executor" {
   count = var.github_app_key_imported ? 1 : 0
 
-  scope              = "${azurerm_key_vault.this.id}/keys/${var.github_app_key_name}"
+  scope              = "${azurerm_key_vault.this.id}/keys/${local.github_app_key}"
   role_definition_id = azurerm_role_definition.kv_sign_only.role_definition_resource_id
   principal_id       = azurerm_user_assigned_identity.executor.principal_id
   principal_type     = "ServicePrincipal"

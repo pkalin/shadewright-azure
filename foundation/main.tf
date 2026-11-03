@@ -12,6 +12,9 @@ resource "random_string" "suffix" {
 locals {
   name   = "${var.prefix}-lab"
   suffix = random_string.suffix.result
+
+  # The one key in the vault (ADR-0006); README "GitHub App key" imports it under this name.
+  github_app_key = "github-app"
 }
 
 resource "azurerm_resource_group" "this" {
