@@ -1,0 +1,80 @@
+name: Terraform
+
+# Format and validate every root on each pull request, with the Terraform version from .terraform-version.
+# Needs no cloud credentials: validate runs with -backend=false, so the job never touches Azure or the state.
+# plan stays local (see README, "Checks"): the state account and Key Vault admit only the admin IPs.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: terraform fmt
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the Terraform version
+        id: version
+        run: echo "terraform=$(tr -d '[:space:]' < .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.version.outputs.terraform }}
+          terraform_wrapper: false
+
+      - name: Check formatting
+        run: |
+          terraform fmt -check -recursive -diff || {
+            echo "::error::Terraform files are not formatted: run 'terraform fmt -recursive' and commit the result"
+            exit 1
+          }
+
+  validate:
+    name: terraform validate (${{ matrix.root }})
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [bootstrap, foundation, lab]
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the Terraform version
+        id: version
+        run: echo "terraform=$(tr -d '[:space:]' < .terraform-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ steps.version.outputs.terraform }}
+          terraform_wrapper: false
+
+      # -lockfile=readonly: providers must match the committed .terraform.lock.hcl, never update it.
+      - name: Init without a backend
+        run: terraform -chdir="$ROOT" init -backend=false -input=false -lockfile=readonly
+        env:
+          ROOT: ${{ matrix.root }}
+
+      - name: Validate
+        run: terraform -chdir="$ROOT" validate
+        env:
+          ROOT: ${{ matrix.root }}
