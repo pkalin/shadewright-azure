@@ -38,7 +38,7 @@ resource "azurerm_role_assignment" "kv_crypto_user_executor" {
   principal_id         = azurerm_user_assigned_identity.executor.principal_id
 }
 
-# Every use of the App key is recorded (ADR-0006): the AuditEvent category, with operation `Sign` for each
+# Every use of the App key is recorded (ADR-0006): the AuditEvent category, with operation name `KeySign` for each
 # JWT, goes to a small Log Analytics workspace that outlives the lab. Query it with KQL (AZKVAuditLogs table).
 # Price (Azure Retail Prices API, swedencentral, 2026-11-02): ingestion 2.99 USD/GB, retention beyond the
 # included 31 days 0.13 USD/GB/month. A signing about once an hour is a few KB a month, so about 0.

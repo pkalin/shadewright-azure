@@ -8,7 +8,7 @@ Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a 
 | --- | --- | --- |
 | `bootstrap/` | Storage account for Terraform state | Permanent |
 | `foundation/` | VNet, Key Vault (GitHub App key), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
-| `lab/` (planned) | AKS, federated credentials, Flux | Apply for a session, destroy after |
+| `lab/` | AKS, federated credentials for both identities, Flux (off by default) | Apply for a session, destroy after |
 
 Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shadewright.io).
 
@@ -20,24 +20,27 @@ Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shade
 
 ## First run
 
+Every command below runs from the repository root; `-chdir` picks the root to apply, and the paths it takes
+(`x.tfplan`, `../backend.hcl`) are relative to that root.
+
 ```bash
 # 1. State storage, with local state first (a git-ignored override switches the backend to local)
-cd bootstrap
-cp terraform.tfvars.example terraform.tfvars        # fill in
-printf 'terraform {\n  backend "local" {}\n}\n' > local_override.tf
-terraform init
-terraform plan -out=x.tfplan && terraform apply x.tfplan && rm x.tfplan
-terraform output -raw backend_config > ../backend.hcl
-rm local_override.tf
-terraform init -migrate-state -backend-config=../backend.hcl   # move the state into the account
-rm -f terraform.tfstate terraform.tfstate.backup
+cp bootstrap/terraform.tfvars.example bootstrap/terraform.tfvars        # fill in
+printf 'terraform {\n  backend "local" {}\n}\n' > bootstrap/local_override.tf
+terraform -chdir=bootstrap init
+terraform -chdir=bootstrap plan -out=x.tfplan && terraform -chdir=bootstrap apply x.tfplan && rm bootstrap/x.tfplan
+terraform -chdir=bootstrap output -raw backend_config > backend.hcl
+rm bootstrap/local_override.tf
+terraform -chdir=bootstrap init -migrate-state -backend-config=../backend.hcl   # move the state into the account
+rm -f bootstrap/terraform.tfstate bootstrap/terraform.tfstate.backup
 
 # 2. Foundation
-cd ../foundation
-cp terraform.tfvars.example terraform.tfvars        # fill in
-terraform init -backend-config=../backend.hcl
-terraform plan -out=x.tfplan && terraform apply x.tfplan && rm x.tfplan
+cp foundation/terraform.tfvars.example foundation/terraform.tfvars        # fill in
+terraform -chdir=foundation init -backend-config=../backend.hcl
+terraform -chdir=foundation plan -out=x.tfplan && terraform -chdir=foundation apply x.tfplan && rm foundation/x.tfplan
 ```
+
+Then register the GitHub App (next section) once. The cluster itself is a session: see "Lab session".
 
 ## GitHub App
 
@@ -66,6 +69,24 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
    ```
 
    Expect your App's name, the three write permissions plus metadata, no events, and one installation with `selected` repositories.
+
+## Lab session
+
+The `lab` root reads the foundation's outputs from its state and creates the AKS cluster, the federated
+credentials of both identities and, when `flux_enabled` is set, Flux pointed at the fleet repository. Apply it
+for a session and destroy it after: the node is the main cost.
+
+```bash
+cp lab/terraform.tfvars.example lab/terraform.tfvars        # fill in; state_backend matches backend.hcl
+terraform -chdir=lab init -backend-config=../backend.hcl
+terraform -chdir=lab plan -out=x.tfplan && terraform -chdir=lab apply x.tfplan && rm lab/x.tfplan
+eval "$(terraform -chdir=lab output -raw get_credentials)"   # kubeconfig for the session
+kubelogin convert-kubeconfig -l azurecli                     # once per kubeconfig
+
+# ... work ...
+
+terraform -chdir=lab destroy
+```
 
 ## Network and peering
 
