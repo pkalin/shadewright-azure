@@ -8,4 +8,4 @@ state_backend = {
   container_name       = "tfstate"
 }
 
-# flux_enabled = true   # once the fleet repo has clusters/lab
+# flux_enabled = false  # a bare cluster, without Flux and the fleet workloads
