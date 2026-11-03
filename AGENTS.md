@@ -22,7 +22,8 @@ terraform plan -out=x.tfplan                      # read it: no surprise destroy
 terraform apply x.tfplan && rm x.tfplan
 ```
 
-Terraform version is pinned in `.terraform-version` (tfenv). Commit `.terraform.lock.hcl`.
+Terraform version is pinned in `.terraform-version` (tfenv). Commit `.terraform.lock.hcl`, with hashes for
+`linux_amd64` (CI) as well as the macOS platforms, the same provider versions in all three roots (README, "Checks").
 
 ## Rules
 
@@ -50,7 +51,7 @@ so the **pull request title** is what counts; a required check (`Conventional PR
 
 - Every change goes through a branch and a pull request; `main` is protected by a ruleset (required checks,
   squash merge, no force push). Keep pull requests small and say why in the description.
-- Run `terraform fmt -check -recursive`, `terraform validate` and a `plan` locally before opening a pull request, and add or update tests in the same pull request.
+- Run `terraform fmt -check -recursive`, `terraform validate` and a `plan` locally before opening a pull request, and add or update tests in the same pull request. CI (`.github/workflows/terraform.yml`) repeats `fmt` and `validate` for every root; `plan` runs only locally (README, "Checks"), so put its summary in the pull request description.
 - Leave the code safer than you found it: when you notice a security or reliability problem nearby, fix it
   or raise it in the pull request, do not ignore it.
 - Prefer boring, well-known solutions and the project's existing patterns over new dependencies or clever code.

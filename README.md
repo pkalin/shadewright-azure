@@ -90,6 +90,41 @@ kubelogin convert-kubeconfig -l azurecli                     # once per kubeconf
 terraform -chdir=lab destroy
 ```
 
+## Checks
+
+Every pull request runs these workflows. `PR title` is required in the `main` ruleset; the four Terraform
+checks become required once the maintainer adds them to the ruleset (until then a failing check does not block a
+merge). CodeQL (`Analyze (actions)`) also runs on every pull request.
+
+- `PR title`: the title follows Conventional Commits (see `AGENTS.md`, "Commits").
+- `Terraform`: `terraform fmt -check -recursive`, then `terraform init -backend=false -lockfile=readonly` and
+  `terraform validate` for `bootstrap`, `foundation` and `lab`, with the version from `.terraform-version`.
+  It needs no cloud credentials and never reads the state.
+
+CI runs on Linux, so every `.terraform.lock.hcl` must hold hashes for `linux_amd64` as well as your platform.
+The three roots pin the same provider versions (`lab` has no `random`). After `init -upgrade` or a provider
+change, refresh all three, so they stay on the same versions:
+
+```bash
+for r in bootstrap foundation lab; do
+  terraform -chdir=$r providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=darwin_amd64
+done
+```
+
+`init` and `validate` start the provider binaries the lock files name, so a pull request from a fork runs code it
+chose on a GitHub runner (read-only token, no secrets). Keep "Require approval for all external contributors" on
+for Actions in the repository settings.
+
+`plan` stays local. It needs the state, and the state account and Key Vault admit only `admin_ip_cidrs`,
+so a GitHub-hosted runner cannot reach them without opening the firewalls (or paying for a runner inside
+the VNet). It also needs the git-ignored tfvars, and a plan posted on a public pull request would show the IDs
+and IPs this repository keeps out of Git. Run it yourself before every pull request and summarise it in the
+description:
+
+```bash
+for r in bootstrap foundation lab; do terraform -chdir=$r plan; done   # after init -backend-config=../backend.hcl
+```
+
 ## Network and peering
 
 All address ranges are decided in `foundation` and read by `lab`: VNet `10.42.0.0/16` (AKS nodes `10.42.0.0/22`), services `10.43.0.0/16`, pods `10.245.0.0/16` (Azure CNI overlay). They avoid the AKS defaults so the lab can be peered with an existing cluster's VNet later. Before peering, check that none of these overlap the remote VNet or its cluster's ranges, then add the remote VNet to `peerings` (lab side) and create the matching peering on the remote side.
