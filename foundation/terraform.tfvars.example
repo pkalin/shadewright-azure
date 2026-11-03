@@ -3,6 +3,9 @@ prefix                = "shadewright"
 admin_ip_cidrs        = ["203.0.113.10/32"]
 budget_contact_emails = ["you@example.com"]
 
+# After importing the GitHub App key (README "GitHub App key"): grants the executor sign on it.
+github_app_key_imported = false
+
 # Start with one small model; add more after the stage 1 benchmark.
 model_deployments = {
   "triage" = {

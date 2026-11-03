@@ -62,7 +62,8 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
    rm ~/Downloads/<app>.private-key.pem
    ```
 
-5. **Check** the whole path (JWT signed in Key Vault, then GitHub's view of the App):
+5. **Grant the executor sign on the key**: set `github_app_key_imported = true` in `foundation/terraform.tfvars` and apply the foundation again. The plan adds one role assignment, scoped to the key. Before this step the executor has no access to the vault.
+6. **Check** the whole path (JWT signed in Key Vault, then GitHub's view of the App):
 
    ```bash
    scripts/github-app-check.sh "$KV" <client-id>

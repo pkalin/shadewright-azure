@@ -1,5 +1,6 @@
 # Holds the GitHub App private key as a non-exportable key (ADR-0006). Terraform never sees the key: import it
-# once by hand, see README "GitHub App key". The vault holds nothing else, so vault scope equals key scope.
+# once by hand, see README "GitHub App key". The vault holds nothing else; the executor's access is still scoped
+# to the one key, so a second key added later is out of its reach.
 #
 # Public endpoint with a firewall (AKS subnet + admin IPs) instead of a private endpoint: same protection
 # for a lab, no monthly charge. Entra ID and Azure RBAC only.
@@ -31,11 +32,31 @@ resource "azurerm_role_assignment" "kv_crypto_officer_admin" {
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
-# The executor signs the App JWT with the key (sign is a crypto operation; no key release, no export).
-resource "azurerm_role_assignment" "kv_crypto_user_executor" {
-  scope                = azurerm_key_vault.this.id
-  role_definition_name = "Key Vault Crypto User"
-  principal_id         = azurerm_user_assigned_identity.executor.principal_id
+# The executor signs the App JWT with the key and may do nothing else (ADR-0006): a custom role whose only
+# data action is sign, assigned at the scope of the one key. The built-in Crypto User would also allow read,
+# update, backup, encrypt, decrypt, wrap, unwrap and verify, on every key in the vault.
+resource "azurerm_role_definition" "kv_sign_only" {
+  name        = "Shadewright Key Vault Signer (${local.name}-${local.suffix})"
+  scope       = azurerm_key_vault.this.id
+  description = "Sign with a Key Vault key. No read of key attributes, no other key operation."
+
+  permissions {
+    actions      = []
+    data_actions = ["Microsoft.KeyVault/vaults/keys/sign/action"]
+  }
+
+  assignable_scopes = [azurerm_key_vault.this.id]
+}
+
+# The key is imported by hand after the first apply (README "GitHub App key"), so this assignment waits for
+# github_app_key_imported. Until then the executor has no access to the vault at all.
+resource "azurerm_role_assignment" "kv_sign_executor" {
+  count = var.github_app_key_imported ? 1 : 0
+
+  scope              = "${azurerm_key_vault.this.id}/keys/${var.github_app_key_name}"
+  role_definition_id = azurerm_role_definition.kv_sign_only.role_definition_resource_id
+  principal_id       = azurerm_user_assigned_identity.executor.principal_id
+  principal_type     = "ServicePrincipal"
 }
 
 # Every use of the App key is recorded (ADR-0006): the AuditEvent category, with operation name `KeySign` for each
