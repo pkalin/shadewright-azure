@@ -1,5 +1,5 @@
 # Flux as the AKS extension: installed and configured through ARM, so Terraform never needs to reach the API
-# server. Off until the fleet repository has a `clusters/lab` path (var.flux_enabled).
+# server. On by default; set flux_enabled = false for a cluster without the fleet workloads.
 
 resource "azurerm_kubernetes_cluster_extension" "flux" {
   count = var.flux_enabled ? 1 : 0

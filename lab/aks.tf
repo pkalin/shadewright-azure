@@ -1,5 +1,7 @@
-# Prices (Azure Retail Prices API, EUR, Sweden Central, checked 2026-11-01): Standard_B2as_v2 node 0.0698/h,
-# Standard public IPv4 for outbound 0.0045/h, E4 Standard SSD OS disk 2.15/month. Free tier: no control-plane charge.
+# Prices (Azure Retail Prices API, EUR, Sweden Central, checked 2026-11-03): Standard_B2as_v2 node 0.0698/h,
+# Standard public IPv4 for outbound 0.0045/h, Standard Load Balancer first 5 rules 0.0224/h (Global meter),
+# 32 GB OS disk 5.21/month as P4 Premium SSD (2.15 as E4 Standard SSD). Free tier: no control-plane charge.
+# About 0.10/h in all; `make lab-cost` prices it live.
 
 resource "azurerm_kubernetes_cluster" "this" {
   name                = "aks-${local.name}"

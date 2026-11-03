@@ -8,13 +8,14 @@ Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a 
 | --- | --- | --- |
 | `bootstrap/` | Storage account for Terraform state | Permanent |
 | `foundation/` | VNet, Key Vault (GitHub App key), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
-| `lab/` | AKS, federated credentials for both identities, Flux (off by default) | Apply for a session, destroy after |
+| `lab/` | AKS, federated credentials for both identities, Flux pointed at the fleet repository | Apply for a session, destroy after |
 
 Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shadewright.io).
 
 ## Prerequisites
 
-- Terraform (version in `.terraform-version`, `tfenv` picks it up), Azure CLI, logged in with `az login`.
+- Terraform (version in `.terraform-version`, `tfenv` picks it up), Azure CLI, logged in with `az login`, plus `jq`,
+  `curl` and GNU Make for the lab commands.
 - Owner (or Contributor plus User Access Administrator) on the subscription.
 - Your public IP: `curl -s https://api.ipify.org`. Every firewall here admits only `admin_ip_cidrs` and the AKS subnet; if your IP changes, update the tfvars and re-apply.
 
@@ -75,31 +76,56 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
 ## Lab session
 
 The `lab` root reads the foundation's outputs from its state and creates the AKS cluster, the federated
-credentials of both identities and, when `flux_enabled` is set, Flux pointed at the fleet repository. Apply it
-for a session and destroy it after: the node is the main cost.
+credentials of both identities and, with `flux_enabled = true` and `fleet_repository_url` set to your own copy of
+the fleet repository, Flux pointed at its `clusters/lab` (off by default: a bare cluster). Apply it for a session and destroy it after: the node is the main
+cost. Once, fill in the variables:
 
 ```bash
 cp lab/terraform.tfvars.example lab/terraform.tfvars        # fill in; state_backend matches backend.hcl
-terraform -chdir=lab init -backend-config=../backend.hcl
-terraform -chdir=lab plan -out=x.tfplan && terraform -chdir=lab apply x.tfplan && rm lab/x.tfplan
+```
+
+Then every session is two commands, run from the repository root (`make help` lists them all):
+
+```bash
+make lab-up      # init, plan to lab/lab-up.tfplan, plan summary and price per hour, then asks; apply on "yes"
 eval "$(terraform -chdir=lab output -raw get_credentials)"   # kubeconfig for the session
 kubelogin convert-kubeconfig -l azurecli                     # once per kubeconfig
 
 # ... work ...
 
-terraform -chdir=lab destroy
+make lab-down    # plan the destroy of lab, ask, apply on "yes", then check that nothing is left
 ```
+
+| Command | What it does | Changes Azure |
+| --- | --- | --- |
+| `make lab-plan` | `terraform plan` of `lab`, nothing saved | No |
+| `make lab-up` | Saves a plan, prints it with a count of creates, updates and deletes (and names every delete or replace), prices the lab, asks; applies exactly the saved plan after a typed `yes` | After `yes` |
+| `make lab-down` | Saves a destroy plan of `lab`, prints it, asks; applies it after a typed `yes`, then runs `lab-check` | After `yes` |
+| `make lab-cost` | Price per hour, per session and per month from the Azure Retail Prices API (public, no login) | No |
+| `make lab-check` | Lists every resource in the subscription by group: lab, foundation, bootstrap, other. Fails while a lab resource group or resource remains, or when anything billed by the hour (VMs, disks, public IPs, load balancers, clusters, NAT gateways, ...) exists outside the lab | No |
+
+The logic is in `scripts/lab.sh`. It reads the subscription and prefix from `lab/terraform.tfvars` and the state
+resource group from `backend.hcl`, and prints resource names and types, never IDs. Only `lab` is ever planned
+or destroyed: there is no way to point it at `foundation` or `bootstrap`. The confirmation is read from the
+terminal, not from standard input, and there is no flag to skip it, so `yes | make lab-up` and CI cannot apply.
+Answering anything but `yes` (lower case) applies nothing, and the saved plan file is removed on exit either way.
+
+When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-down` again (a destroy interrupted
+half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after
+checking it is yours.
 
 ## Checks
 
-Every pull request runs these workflows. `PR title` is required in the `main` ruleset; the four Terraform
-checks become required once the maintainer adds them to the ruleset (until then a failing check does not block a
-merge). CodeQL (`Analyze (actions)`) also runs on every pull request.
+Every pull request runs these workflows. The `main` ruleset requires `Conventional PR title`, `terraform fmt`
+and `terraform validate` for each of the three roots. CodeQL (`Analyze (actions)`) also runs on every pull request.
 
 - `PR title`: the title follows Conventional Commits (see `AGENTS.md`, "Commits").
 - `Terraform`: `terraform fmt -check -recursive`, then `terraform init -backend=false -lockfile=readonly` and
   `terraform validate` for `bootstrap`, `foundation` and `lab`, with the version from `.terraform-version`.
   It needs no cloud credentials and never reads the state.
+
+`make check` runs the same `fmt` and `validate` locally. Shell scripts in `scripts/` use `set -euo pipefail`; run
+`shellcheck scripts/*.sh` when you change them.
 
 CI runs on Linux, so every `.terraform.lock.hcl` must hold hashes for `linux_amd64` as well as your platform.
 The three roots pin the same provider versions (`lab` has no `random`). After `init -upgrade` or a provider
@@ -131,4 +157,24 @@ All address ranges are decided in `foundation` and read by `lab`: VNet `10.42.0.
 
 ## Cost
 
-The foundation has no fixed compute: Key Vault, storage and the AI Services account are billed per use. The AKS node in `lab` is the main cost and only runs while the lab exists. Prices are noted in comments with the date they were checked.
+The foundation has no fixed compute: Key Vault, storage, Log Analytics and the AI Services account are billed per
+use. The lab is billed by the hour while it exists and costs nothing once `make lab-down` has passed its check.
+
+Lab with the defaults (one `Standard_B2as_v2` node, Sweden Central), Azure Retail Prices API, EUR, pay as you go,
+checked 2026-11-03:
+
+| Resource | Meter | EUR per hour | EUR per month (730 h) |
+| --- | --- | ---: | ---: |
+| AKS node, `Standard_B2as_v2` Linux | Virtual Machines Basv2 Series, B2as v2 | 0.0698 | 50.95 |
+| OS disk, 32 GB managed | Premium SSD Managed Disks, P4 LRS Disk (5.2132 per month) | 0.0071 | 5.21 |
+| Standard Load Balancer, outbound rule | Load Balancer, Standard Included LB Rules and Outbound Rules (Global) | 0.0224 | 16.35 |
+| Public IPv4 for outbound | Virtual Network, Standard IPv4 Static Public IP | 0.0045 | 3.28 |
+| AKS cluster management, Free tier | none ([pricing tiers](https://learn.microsoft.com/azure/aks/free-standard-pricing-tiers)) | 0 | 0 |
+| Flux extension on AKS | none ([GitOps with Flux v2](https://learn.microsoft.com/azure/azure-arc/kubernetes/conceptual-gitops-flux2)) | 0 | 0 |
+| **Total** | | **about 0.10** | **about 76** |
+
+An 8-hour session costs about 0.83 EUR; a lab forgotten for a month costs about 76 EUR. Usage-based extras
+(load balancer data processed 0.0045 per GB, internet egress, model tokens) come on top. `make lab-cost` repeats
+the lookup for the current prices and your `node_vm_size`, `node_count` and `location`; `OS_DISK_TIER=E4` prices
+a Standard SSD OS disk (2.15 per month), `CURRENCY=USD` and `SESSION_HOURS=4` change the other columns. Prices
+are also noted in comments next to the resources, with the date they were checked.

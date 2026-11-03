@@ -8,4 +8,7 @@ state_backend = {
   container_name       = "tfstate"
 }
 
-# flux_enabled = true   # once the fleet repo has clusters/lab
+# Flux and the fleet workloads are off by default (a bare cluster). To turn them on, name the repository you
+# chose: Flux applies whatever lands on its branch.
+# flux_enabled         = true
+# fleet_repository_url = "https://github.com/<you>/shadewright-fleet"
