@@ -99,6 +99,13 @@ Every pull request runs two workflows; their checks are required in the `main` r
   `terraform validate` for `bootstrap`, `foundation` and `lab`, with the version from `.terraform-version`.
   It needs no cloud credentials and never reads the state.
 
+CI runs on Linux, so every `.terraform.lock.hcl` must hold hashes for `linux_amd64` as well as your platform.
+After `init -upgrade` or a provider change, refresh them in the root you changed:
+
+```bash
+terraform -chdir=<root> providers lock -platform=linux_amd64 -platform=darwin_arm64 -platform=darwin_amd64
+```
+
 `plan` stays local. It needs the state, and the state account and Key Vault admit only `admin_ip_cidrs`,
 so a GitHub-hosted runner cannot reach them without opening the firewalls (or paying for a runner inside
 the VNet). It also needs the git-ignored tfvars, and a plan posted on a public pull request would show the IDs
