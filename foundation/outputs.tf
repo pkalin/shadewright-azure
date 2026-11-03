@@ -32,6 +32,8 @@ output "key_vault" {
   value = {
     name = azurerm_key_vault.this.name
     uri  = azurerm_key_vault.this.vault_uri
+    # Name of the GitHub App key to import (README "GitHub App key").
+    github_app_key = local.github_app_key
   }
 }
 

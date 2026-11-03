@@ -57,12 +57,14 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
 
    ```bash
    KV=$(terraform -chdir=foundation output -json key_vault | jq -r .name)
-   az keyvault key import --vault-name "$KV" --name github-app --pem-file ~/Downloads/<app>.private-key.pem \
+   KEY=$(terraform -chdir=foundation output -json key_vault | jq -r .github_app_key)
+   az keyvault key import --vault-name "$KV" --name "$KEY" --pem-file ~/Downloads/<app>.private-key.pem \
      --ops sign --protection software --exportable false
    rm ~/Downloads/<app>.private-key.pem
    ```
 
-5. **Check** the whole path (JWT signed in Key Vault, then GitHub's view of the App):
+5. **Grant the executor sign on the key**: set `github_app_key_imported = true` in `foundation/terraform.tfvars` and apply the foundation again. The plan adds one role assignment, scoped to the key. Before this step the executor has no access to the vault. A foundation applied before this flag existed (the key imported, the executor on the vault-wide `Key Vault Crypto User`) needs the flag too: without it the upgrade removes the old grant and adds none.
+6. **Check** the whole path (JWT signed in Key Vault, then GitHub's view of the App). The script runs as you (`az login`), not as the executor, so it does not test the executor's grant:
 
    ```bash
    scripts/github-app-check.sh "$KV" <client-id>

@@ -107,3 +107,9 @@ variable "tags" {
   description = "Tags on every resource."
   default     = { project = "shadewright" }
 }
+
+variable "github_app_key_imported" {
+  type        = bool
+  description = "Set to true once the GitHub App key is imported (README \"GitHub App key\"): grants the executor sign on it."
+  default     = false
+}
