@@ -10,6 +10,14 @@ resource "azurerm_cognitive_account" "this" {
   custom_subdomain_name = "ais-${local.name}-${local.suffix}"
   local_auth_enabled    = false
 
+  # Azure turns these on for AI Services accounts (the Foundry resource with projects), and the provider then
+  # forces a replacement to turn them off again, which would delete the model deployments. Kept as Azure has
+  # them; the identity is the account's own and is granted nothing here.
+  project_management_enabled = true
+  identity {
+    type = "SystemAssigned"
+  }
+
   # Firewall: the AKS subnet for the in-cluster analyzer, admin IPs for local development.
   network_acls {
     default_action = "Deny"
