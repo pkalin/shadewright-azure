@@ -18,7 +18,4 @@ provider "azurerm" {
   features {}
   subscription_id     = var.subscription_id
   storage_use_azuread = true
-
-  # Not in the default registration set: the Flux extension.
-  resource_providers_to_register = ["Microsoft.KubernetesConfiguration"]
 }

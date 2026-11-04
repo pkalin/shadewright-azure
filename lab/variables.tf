@@ -56,7 +56,7 @@ variable "executor_service_account" {
 
 variable "flux_enabled" {
   type        = bool
-  description = "Install Flux and point it at clusters/lab in the fleet repository. Off by default, so nobody syncs a repository they did not choose: set it together with fleet_repository_url."
+  description = "Have `make lab-up` install Flux (a post-apply step, not a Terraform resource) and point it at clusters/lab in the fleet repository. Off by default, so nobody syncs a repository they did not choose: set it together with fleet_repository_url."
   default     = false
 }
 

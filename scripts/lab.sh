@@ -2,7 +2,11 @@
 # Brings the disposable lab (the `lab` root, ADR-0008) up and down, prices it, and checks that nothing is left.
 #
 #   scripts/lab.sh plan    plan the lab; changes nothing
-#   scripts/lab.sh up      plan to a file, show it and the cost per hour, ask for "yes", apply that saved plan
+#   scripts/lab.sh up      plan to a file, show it and the cost per hour, ask for "yes", apply that saved plan, then
+#                          install Flux and point it at the fleet when flux_enabled is true (when nothing is to
+#                          apply, the Flux step alone, after its own "yes")
+#   scripts/lab.sh flux    only that Flux step, for a cluster that is up, after a "yes" (idempotent: run it again
+#                          after a failure)
 #   scripts/lab.sh down    plan the destroy of `lab` (never foundation or bootstrap), ask for "yes", apply it,
 #                          then run `check`
 #   scripts/lab.sh cost    the lab's price per hour from the Azure Retail Prices API (public, no login)
@@ -10,7 +14,7 @@
 #
 # Reads the subscription and prefix from the git-ignored lab/terraform.tfvars and the state resource group from
 # ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. There is no flag to skip
-# the confirmation: up and down need a terminal and a typed "yes".
+# the confirmation: up, flux and down need a terminal and a typed "yes".
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -23,11 +27,13 @@ currency=${CURRENCY:-EUR}
 os_disk_tier=${OS_DISK_TIER:-P4}
 session_hours=${SESSION_HOURS:-8}
 prices_api="https://prices.azure.com/api/retail/prices"
+# shellcheck source=scripts/flux.env
+. "$repo/scripts/flux.env"
 
 die() { printf 'lab: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
 
-usage() { sed -n '2,13s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,17s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 need() { for c in "$@"; do command -v "$c" >/dev/null || die "$c is not installed"; done; }
 
@@ -151,7 +157,7 @@ cmd_cost() {
       row(n " x " tier " managed OS disk (" disk_m " per month)", n * disk_m / 730)
       row("Standard public IPv4 (outbound)", ip_h)
       row("Standard Load Balancer, first 5 rules", lb_h)
-      row("AKS Free tier, Flux extension on AKS", 0)
+      row("AKS Free tier, Flux (in-cluster, no add-on)", 0)
       printf "%-42s %9.4f %9.2f %9.2f  %s\n", "Total", total, total * s, total * 730, cur
     }'
   cat <<'EOF'
@@ -211,25 +217,208 @@ cmd_plan() {
   tf plan -input=false
 }
 
+# --- Flux, installed after the apply (ADR-0022, amended 2026-11-04) -----------------------------------------------
+# Not a Terraform resource: the AKS extension took 17 minutes (2026-11-04), and a Terraform kubernetes provider would be
+# configured from the cluster created in the same apply. Everything here is idempotent (server-side apply), so a
+# failed step is repaired by running it again.
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
+}
+
+# flux_prepare <install.yaml> <out>: the release manifest with (1) every controller image pinned by digest
+# (FLUX_IMAGES), (2) the multi-tenancy the AKS extension enables by default (Microsoft Learn, "GitOps with Flux v2",
+# Multi-tenancy): --no-cross-namespace-refs on the kustomize, helm and notification controllers, and
+# --default-service-account=flux-applier on the kustomize and helm controllers, so Flux objects are applied by
+# impersonating the flux-applier ServiceAccount, which gets a cluster-admin binding as the extension's cluster-scope
+# configuration did, and (3) everything of the image-reflector, image-automation and source-watcher controllers left
+# out (Deployment, ServiceAccount, Service, and the image.toolkit.fluxcd.io CRDs): the lab uses none of them. The
+# shared ClusterRoleBinding still names their ServiceAccounts as subjects, which is harmless without the accounts.
+flux_prepare() {
+  awk -v pins="$FLUX_IMAGES" '
+    BEGIN {
+      n = split(pins, p, " ")
+      for (i = 1; i <= n; i++) { split(p[i], kv, "="); want[kv[1]] = kv[2] }
+      split("image-automation-controller image-reflector-controller source-watcher", d, " ")
+      for (i in d) drop[d[i]] = 1
+      split("helm-controller kustomize-controller notification-controller", x, " ")
+      for (i in x) noxns[x[i]] = 1
+      defsa["helm-controller"] = 1; defsa["kustomize-controller"] = 1
+    }
+    function flush() {
+      if (doc == "") return
+      # The Deployment, ServiceAccount and Service of a dropped controller, and the image CRDs, are left out.
+      if (!((name in drop) || (kind == "CustomResourceDefinition" && name ~ /\.image\.toolkit\.fluxcd\.io$/))) printf "---\n%s", doc
+      doc = ""; isdep = 0; name = ""; kind = ""
+    }
+    /^---$/ { flush(); next }
+    {
+      if ($0 ~ /^kind: /) kind = $2
+      if ($0 == "kind: Deployment") isdep = 1
+      if (name == "" && $0 ~ /^  name: /) name = $2
+      line = $0
+      if (isdep && $0 ~ /^        image: ghcr.io\/fluxcd\//) {
+        img = $2; sub(/^ghcr.io\/fluxcd\//, "", img)
+        split(img, t, ":")
+        if (!(name in drop)) {
+          if (!(t[1] in want)) { print "unpinned image " img > "/dev/stderr"; bad = 1 }
+          else if (substr(want[t[1]], 1, index(want[t[1]], "@") - 1) != t[2]) { print "image " img " is not the pinned tag" > "/dev/stderr"; bad = 1 }
+          else line = "        image: ghcr.io/fluxcd/" t[1] ":" want[t[1]]
+        }
+      }
+      doc = doc line "\n"
+      if (isdep && ($0 == "        - --watch-all-namespaces") && (name in noxns)) doc = doc "        - --no-cross-namespace-refs=true\n"
+      if (isdep && ($0 == "        - --watch-all-namespaces") && (name in defsa)) doc = doc "        - --default-service-account=flux-applier\n"
+    }
+    END {
+      flush()
+      printf "---\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: flux-applier\n  namespace: flux-system\n"
+      printf "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: flux-applier\n"
+      printf "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: cluster-admin\n"
+      printf "subjects:\n- kind: ServiceAccount\n  name: flux-applier\n  namespace: flux-system\n"
+      exit bad
+    }
+  ' "$1" >"$2" || return 1
+  # The result is checked, not trusted: four controllers, all pinned, three with the multi-tenancy flag.
+  [[ $(grep -c '^kind: Deployment$' "$2") == 4 ]] || { printf 'lab: the Flux manifest does not hold four Deployments\n' >&2; return 1; }
+  [[ $(grep -c -- '--no-cross-namespace-refs=true$' "$2") == 3 ]] || { printf 'lab: multi-tenancy flag missing\n' >&2; return 1; }
+  [[ $(grep -c -- '--default-service-account=flux-applier$' "$2") == 2 ]] || { printf 'lab: default service account flag missing\n' >&2; return 1; }
+  if grep -E '^[[:space:]]*image:[[:space:]]*[^[:space:]]' "$2" | grep -vqE '@sha256:[0-9a-f]{64}$'; then
+    printf 'lab: an image in the Flux manifest is not pinned by digest\n' >&2
+    return 1
+  fi
+}
+
+# flux_fetch <out>: the pinned release's install.yaml, prepared; refuses a file that does not match its checksum.
+flux_fetch() {
+  local raw="$tmp/flux-install.yaml" got
+  curl -fsSL --proto '=https' --max-time 120 --retry 3 -o "$raw" \
+    "https://github.com/fluxcd/flux2/releases/download/${FLUX_VERSION}/install.yaml" ||
+    die "cannot download the Flux $FLUX_VERSION manifest"
+  got=$(sha256_of "$raw")
+  [[ $got == "$FLUX_INSTALL_SHA256" ]] ||
+    die "checksum mismatch for the Flux $FLUX_VERSION install.yaml: expected $FLUX_INSTALL_SHA256, got $got"
+  flux_prepare "$raw" "$1" || die "cannot prepare the Flux manifest"
+}
+
+# flux_objects <the flux output as JSON>: the GitRepository "fleet" (60 s) and the root Kustomization "lab" that
+# applies ./clusters/lab with the substitutions from Terraform, as a JSON List for kubectl. Values travel as jq data,
+# never through shell or YAML quoting.
+flux_objects() {
+  jq -e '
+    {apiVersion: "v1", kind: "List", items: [
+      {apiVersion: "source.toolkit.fluxcd.io/v1", kind: "GitRepository",
+       metadata: {name: "fleet", namespace: "flux-system"},
+       spec: {interval: "1m", timeout: "60s", url: .repository_url, ref: {branch: .branch}}},
+      {apiVersion: "kustomize.toolkit.fluxcd.io/v1", kind: "Kustomization",
+       metadata: {name: "lab", namespace: "flux-system"},
+       spec: {interval: "2m", retryInterval: "1m", timeout: "5m", sourceRef: {kind: "GitRepository", name: "fleet"},
+              path: "./clusters/lab", prune: true, wait: false, postBuild: {substitute: .substitute}}}]}
+  ' <<<"$1"
+}
+
+# flux_validate <flux output JSON>: refuse anything that is not a plain HTTPS URL and a plain branch name.
+flux_validate() {
+  local url branch
+  url=$(jq -r '.repository_url // empty' <<<"$1")
+  branch=$(jq -r '.branch // empty' <<<"$1")
+  [[ $url =~ ^https://[A-Za-z0-9._/-]+$ ]] || die "fleet_repository_url must be a plain https:// URL"
+  [[ $branch =~ ^[A-Za-z0-9._/-]+$ ]] || die "fleet_branch has characters a branch name does not need"
+  jq -e '.substitute | type == "object" and all(.[]; type == "string")' <<<"$1" >/dev/null ||
+    die "the flux output has no string substitutions"
+}
+
+kc() { kubectl --kubeconfig "$tmp/kubeconfig" "$@"; }
+
+# flux_preflight: what can fail without a cluster, checked before anything is billed: the tools, and the pinned
+# manifest (download, checksum, prepare) into $tmp/flux.yaml. Only when flux_enabled is true in tfvars or by default;
+# before the first apply the flux output does not exist yet, so the setting is read the way cost does.
+flux_preflight() {
+  [[ $(setting lab flux_enabled) == true ]] || return 0
+  need kubectl kubelogin curl jq az awk
+  info "Flux $FLUX_VERSION: download, verify, pin"
+  flux_fetch "$tmp/flux.yaml"
+}
+
+# flux_fail <message>: the one way out of flux_install on an error.
+flux_fail() { printf 'lab: %s\n' "$1" >&2; return 1; }
+
+# flux_install [ask]: with an argument, asks for a typed yes first (a step that is not part of an applied plan).
+# Called as `flux_install || ...`, which switches set -e off inside it: every step ends in `|| return 1`.
+flux_install() {
+  local cfg manifest="$tmp/flux.yaml" i=0 rg cluster
+  cfg=$(tf output -json flux) || { flux_fail "cannot read the flux output of the lab: is the lab applied?"; return 1; }
+  if [[ $(jq -r 'type' <<<"$cfg") != object ]]; then
+    printf '\nflux_enabled is false: Flux is not installed.\n'
+    return 0
+  fi
+  need kubectl kubelogin curl jq az awk
+  flux_validate "$cfg"
+  [[ -z ${1:-} ]] || confirm "Install Flux $FLUX_VERSION in the running lab cluster and point it at the fleet repository?"
+  if [[ ! -s $manifest ]]; then
+    info "Flux $FLUX_VERSION: download, verify, pin"
+    flux_fetch "$manifest" || return 1
+  fi
+
+  info "Flux: kubeconfig (a private file, removed on exit; your own kubeconfig is not touched)"
+  rg=$(tf output -raw resource_group_name) || { flux_fail "cannot read resource_group_name"; return 1; }
+  cluster=$(tf output -raw cluster_name) || { flux_fail "cannot read cluster_name"; return 1; }
+  az aks get-credentials --subscription "$subscription" -g "$rg" -n "$cluster" --file "$tmp/kubeconfig" \
+    --overwrite-existing >/dev/null || { flux_fail "az aks get-credentials failed"; return 1; }
+  kubelogin convert-kubeconfig -l azurecli --kubeconfig "$tmp/kubeconfig" || { flux_fail "kubelogin failed"; return 1; }
+  # A new cluster, and a role assignment that has just been made, can take a minute to answer.
+  until [[ $(kc auth can-i create clusterroles 2>/dev/null) == yes ]]; do
+    i=$((i + 1))
+    ((i <= 36)) || { flux_fail "the API server did not accept your credentials within 3 minutes"; return 1; }
+    sleep "${FLUX_POLL:-5}"
+  done
+
+  info "Flux: install"
+  kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f "$manifest" >/dev/null ||
+    { flux_fail "applying the Flux manifest failed"; return 1; }
+  kc wait --for=condition=Established crd -l app.kubernetes.io/part-of=flux --timeout=120s >/dev/null ||
+    { flux_fail "the Flux CRDs are not Established"; return 1; }
+  kc -n flux-system wait --for=condition=Available deployment --all --timeout=300s >/dev/null ||
+    { flux_fail "the Flux controllers are not Available: kubectl -n flux-system get pods"; return 1; }
+
+  info "Flux: GitRepository fleet and Kustomization lab"
+  flux_objects "$cfg" | kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f - >/dev/null ||
+    { flux_fail "applying the GitRepository and the Kustomization failed"; return 1; }
+  kc -n flux-system wait --for=condition=Ready gitrepository/fleet kustomization/lab --timeout=300s >/dev/null ||
+    { flux_fail "the GitRepository fleet or the Kustomization lab is not Ready within 5 minutes: run make lab-flux again, or kubectl -n flux-system describe gitrepository fleet kustomization lab"; return 1; }
+  printf '\nFlux %s syncs ./clusters/lab; the root Kustomization is flux-system/lab.\n' "$FLUX_VERSION"
+}
+
+cmd_flux() {
+  need terraform jq
+  lab_config
+  tf_init
+  flux_preflight
+  flux_install ask || die "the Flux step failed: run make lab-flux again"
+}
+
 cmd_up() {
   need terraform jq curl az
   lab_config
   tf_init
+  flux_preflight
   local plan="lab-up.tfplan" rc=0
   info "terraform plan (lab) to $plan"
   tf plan -input=false -detailed-exitcode -out="$plan" || rc=$?
   case $rc in
-    0) printf '\nThe lab is up to date: nothing to apply.\n'; return 0 ;;
+    0) printf '\nThe lab is up to date: nothing to apply.\n'; flux_install ask || die "the Flux step failed: run make lab-flux again"; return 0 ;;
     2) ;;
     *) die "terraform plan failed" ;;
   esac
   plan_summary "$plan"
   # A subshell, because cmd_cost exits through die: a price lookup failure only warns.
   (cmd_cost) || printf 'lab: price lookup failed, check the README cost table\n' >&2
-  confirm "Apply exactly this plan to the lab?"
+  confirm "Apply exactly this plan to the lab (then install Flux, when flux_enabled)?"
   info "terraform apply $plan"
   tf apply -input=false "$plan" ||
     die "terraform apply failed: parts of the lab may be up and billed; run make lab-down or make lab-check"
+  flux_install ||
+    die "the Flux step failed: the cluster is up and billed; run make lab-flux to repeat it, or make lab-down"
   cat <<'EOF'
 
 The lab is up and costs money by the hour. Get a kubeconfig, and destroy it when done:
@@ -277,6 +466,7 @@ case ${1:-help} in
   down) cmd_down ;;
   cost) cmd_cost ;;
   check) cmd_check ;;
+  flux) cmd_flux ;;
   help | -h | --help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

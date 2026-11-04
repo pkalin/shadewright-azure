@@ -5,7 +5,7 @@ SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 ROOTS := bootstrap foundation lab
 
-.PHONY: help lab-plan lab-up lab-down lab-cost lab-check check test
+.PHONY: help lab-plan lab-up lab-flux lab-down lab-cost lab-check check test
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -15,6 +15,9 @@ lab-plan: ## Plan the lab; changes nothing
 
 lab-up: ## Plan, show the plan and the price per hour, ask for yes, apply the saved plan
 	@scripts/lab.sh up
+
+lab-flux: ## Repeat the Flux install after lab-up (idempotent; for a cluster that is up and flux_enabled)
+	@scripts/lab.sh flux
 
 lab-down: ## Destroy the lab (only), after a yes, then check that nothing is left
 	@scripts/lab.sh down
