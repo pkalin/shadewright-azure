@@ -175,6 +175,11 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   exit "$fails"
 ) || fails=$?
 
+hint=$(apply_failed_hint)
+eq "failed-apply hint mentions a cluster outside the state" "$(grep -c 'outside the Terraform state' <<<"$hint")" 1
+eq "failed-apply hint points at make lab-check" "$(grep -c 'make lab-check' <<<"$hint")" 1
+eq "failed-apply hint points at az aks delete" "$(grep -c 'az aks delete' <<<"$hint")" 1
+
 # scripts/flux.env must hold the release and digests of the fleet's scripts/tools.env (README, "Flux"). Compared when
 # that file is found: FLEET_TOOLS_ENV, else the sibling checkout. CI downloads it from the fleet's main.
 fleet_env=${FLEET_TOOLS_ENV:-$here/../../shadewright-fleet/scripts/tools.env}

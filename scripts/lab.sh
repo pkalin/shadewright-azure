@@ -397,6 +397,12 @@ cmd_flux() {
   flux_install ask || die "the Flux step failed: run make lab-flux again"
 }
 
+# The text after a failed apply. A cluster that Azure created but could not finish (for example AllocationFailed) is
+# not in the state, so `make lab-down` cannot remove it.
+apply_failed_hint() {
+  printf '%s' "terraform apply failed: parts of the lab may be up and billed, and a cluster may exist in Azure outside the Terraform state (for example after AllocationFailed). Run make lab-check to list what is left; delete a failed cluster with az aks delete, then plan again (README, Troubleshooting). Run make lab-down for what the state holds."
+}
+
 cmd_up() {
   need terraform jq curl az
   lab_config
@@ -416,7 +422,7 @@ cmd_up() {
   confirm "Apply exactly this plan to the lab (then install Flux, when flux_enabled)?"
   info "terraform apply $plan"
   tf apply -input=false "$plan" ||
-    die "terraform apply failed: parts of the lab may be up and billed; run make lab-down or make lab-check"
+    die "$(apply_failed_hint)"
   flux_install ||
     die "the Flux step failed: the cluster is up and billed; run make lab-flux to repeat it, or make lab-down"
   cat <<'EOF'
