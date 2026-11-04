@@ -115,15 +115,16 @@ Answering anything but `yes` (lower case) applies nothing, and the saved plan fi
 
 ### Flux
 
-Flux is not an AKS extension and not a Terraform resource: the extension took 17 minutes to create (measured 2026-11-04) after the
-cluster, and a Terraform `kubernetes` provider would have to be configured from a cluster created in the same apply.
-With `flux_enabled = true`, `make lab-up` does it after the apply, in about two minutes (the extension took 17 minutes 15 seconds on 2026-11-04), from your own kubeconfig
+Flux is not an AKS extension and not a Terraform resource: the extension took 17 minutes 15 seconds to create after the
+cluster (measured 2026-11-04), and a Terraform `kubernetes` provider would have to be configured from a cluster created in the same apply.
+With `flux_enabled = true`, `make lab-up` does it after the apply, in about two minutes, from your own kubeconfig
 (a private temporary file; yours is not touched). It needs `kubectl`, `kubelogin`, `curl`, `jq` and `az`, and your
 account needs the `Azure Kubernetes Service RBAC Cluster Admin` role that `lab` grants it.
 
 1. Downloads the pinned Flux `install.yaml` (`scripts/flux.env`, the release the fleet's Kind cluster uses), refuses it
    unless its SHA-256 matches, and pins the four controller images by digest. The image controllers and
-   `source-watcher` are left out: the lab uses none of them.
+   `source-watcher` are left out with their ServiceAccounts, Services and the `image.toolkit.fluxcd.io` CRDs: the lab
+   uses none of them. (The shared `crd-controller` ClusterRoleBinding still lists their ServiceAccounts, harmlessly.)
 2. Replicates the multi-tenancy the extension enables by default
    ([Microsoft Learn](https://learn.microsoft.com/azure/azure-arc/kubernetes/conceptual-gitops-flux2#multi-tenancy)):
    `--no-cross-namespace-refs=true` on the kustomize, helm and notification controllers (every Flux object stays in
@@ -134,13 +135,21 @@ account needs the `Azure Kubernetes Service RBAC Cluster Admin` role that `lab` 
    `fleet_branch` of `fleet_repository_url`, every 60 seconds) and the root Kustomization `lab`
    (`./clusters/lab`, every 2 minutes, with the `postBuild` substitutions from the `flux` output of `lab`).
 
+Before the plan is shown, `make lab-up` checks the tools and downloads, verifies and prepares the manifest, so a
+missing tool or a bad download fails before anything is billed. After the install it waits (up to five minutes) for the
+`GitRepository` and the root Kustomization to be Ready; on a timeout it fails and points at `make lab-flux` and
+`kubectl -n flux-system describe`.
+
 Everything is a server-side apply, so it is safe to repeat: `make lab-flux` runs just this step on a cluster that is up
 (after a failed download, a slow API server or a timeout), and a second `make lab-up` with nothing to apply runs it
 too. Both ask for a typed `yes` first, like every command that changes something; after an apply the `yes` for the
 plan covers the Flux step. There is no
 `flux bootstrap`: it would commit manifests to the fleet repository, which holds none. The cluster dies with
 `make lab-down`, and so does everything Flux made; nothing outside the cluster is created. Upgrading Flux is a
-change to `scripts/flux.env`, together with the fleet's `scripts/tools.env`.
+change to `scripts/flux.env`, together with the fleet's `scripts/tools.env`: `scripts/lab_test.sh` compares the two
+(version, checksum, the four digests) whenever it finds the fleet's file, and CI fetches it from the fleet's `main`, so
+bump the fleet first. A lab applied with the AKS extension (before this change) must be destroyed first
+(`make lab-down`); applying this version on top would destroy the extension and its configuration in the plan.
 
 When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-down` again (a destroy interrupted
 half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after

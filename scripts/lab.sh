@@ -231,8 +231,9 @@ sha256_of() {
 # Multi-tenancy): --no-cross-namespace-refs on the kustomize, helm and notification controllers, and
 # --default-service-account=flux-applier on the kustomize and helm controllers, so Flux objects are applied by
 # impersonating the flux-applier ServiceAccount, which gets a cluster-admin binding as the extension's cluster-scope
-# configuration did, and (3) the image-reflector, image-automation and source-watcher Deployments left out: the lab
-# uses none of them.
+# configuration did, and (3) everything of the image-reflector, image-automation and source-watcher controllers left
+# out (Deployment, ServiceAccount, Service, and the image.toolkit.fluxcd.io CRDs): the lab uses none of them. The
+# shared ClusterRoleBinding still names their ServiceAccounts as subjects, which is harmless without the accounts.
 flux_prepare() {
   awk -v pins="$FLUX_IMAGES" '
     BEGIN {
@@ -246,13 +247,15 @@ flux_prepare() {
     }
     function flush() {
       if (doc == "") return
-      if (!(isdep && (name in drop))) printf "---\n%s", doc
-      doc = ""; isdep = 0; name = ""
+      # The Deployment, ServiceAccount and Service of a dropped controller, and the image CRDs, are left out.
+      if (!((name in drop) || (kind == "CustomResourceDefinition" && name ~ /\.image\.toolkit\.fluxcd\.io$/))) printf "---\n%s", doc
+      doc = ""; isdep = 0; name = ""; kind = ""
     }
     /^---$/ { flush(); next }
     {
+      if ($0 ~ /^kind: /) kind = $2
       if ($0 == "kind: Deployment") isdep = 1
-      if (isdep && name == "" && $0 ~ /^  name: /) name = $2
+      if (name == "" && $0 ~ /^  name: /) name = $2
       line = $0
       if (isdep && $0 ~ /^        image: ghcr.io\/fluxcd\//) {
         img = $2; sub(/^ghcr.io\/fluxcd\//, "", img)
@@ -327,10 +330,24 @@ flux_validate() {
 
 kc() { kubectl --kubeconfig "$tmp/kubeconfig" "$@"; }
 
+# flux_preflight: what can fail without a cluster, checked before anything is billed: the tools, and the pinned
+# manifest (download, checksum, prepare) into $tmp/flux.yaml. Only when flux_enabled is true in tfvars or by default;
+# before the first apply the flux output does not exist yet, so the setting is read the way cost does.
+flux_preflight() {
+  [[ $(setting lab flux_enabled) == true ]] || return 0
+  need kubectl kubelogin curl jq az awk
+  info "Flux $FLUX_VERSION: download, verify, pin"
+  flux_fetch "$tmp/flux.yaml"
+}
+
+# flux_fail <message>: the one way out of flux_install on an error.
+flux_fail() { printf 'lab: %s\n' "$1" >&2; return 1; }
+
 # flux_install [ask]: with an argument, asks for a typed yes first (a step that is not part of an applied plan).
+# Called as `flux_install || ...`, which switches set -e off inside it: every step ends in `|| return 1`.
 flux_install() {
-  local cfg manifest="$tmp/flux.yaml" i=0
-  cfg=$(tf output -json flux) || die "cannot read the flux output of the lab: is the lab applied?"
+  local cfg manifest="$tmp/flux.yaml" i=0 rg cluster
+  cfg=$(tf output -json flux) || { flux_fail "cannot read the flux output of the lab: is the lab applied?"; return 1; }
   if [[ $(jq -r 'type' <<<"$cfg") != object ]]; then
     printf '\nflux_enabled is false: Flux is not installed.\n'
     return 0
@@ -338,29 +355,37 @@ flux_install() {
   need kubectl kubelogin curl jq az awk
   flux_validate "$cfg"
   [[ -z ${1:-} ]] || confirm "Install Flux $FLUX_VERSION in the running lab cluster and point it at the fleet repository?"
-  info "Flux $FLUX_VERSION: download, verify, pin"
-  flux_fetch "$manifest"
+  if [[ ! -s $manifest ]]; then
+    info "Flux $FLUX_VERSION: download, verify, pin"
+    flux_fetch "$manifest" || return 1
+  fi
 
   info "Flux: kubeconfig (a private file, removed on exit; your own kubeconfig is not touched)"
-  az aks get-credentials --subscription "$subscription" -g "$(tf output -raw resource_group_name)" \
-    -n "$(tf output -raw cluster_name)" --file "$tmp/kubeconfig" --overwrite-existing >/dev/null
-  kubelogin convert-kubeconfig -l azurecli --kubeconfig "$tmp/kubeconfig"
+  rg=$(tf output -raw resource_group_name) || { flux_fail "cannot read resource_group_name"; return 1; }
+  cluster=$(tf output -raw cluster_name) || { flux_fail "cannot read cluster_name"; return 1; }
+  az aks get-credentials --subscription "$subscription" -g "$rg" -n "$cluster" --file "$tmp/kubeconfig" \
+    --overwrite-existing >/dev/null || { flux_fail "az aks get-credentials failed"; return 1; }
+  kubelogin convert-kubeconfig -l azurecli --kubeconfig "$tmp/kubeconfig" || { flux_fail "kubelogin failed"; return 1; }
   # A new cluster, and a role assignment that has just been made, can take a minute to answer.
   until [[ $(kc auth can-i create clusterroles 2>/dev/null) == yes ]]; do
     i=$((i + 1))
-    ((i <= 36)) || die "the API server did not accept your credentials within 3 minutes"
-    sleep 5
+    ((i <= 36)) || { flux_fail "the API server did not accept your credentials within 3 minutes"; return 1; }
+    sleep "${FLUX_POLL:-5}"
   done
 
   info "Flux: install"
-  kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f "$manifest" >/dev/null
-  kc wait --for=condition=Established crd -l app.kubernetes.io/part-of=flux --timeout=120s >/dev/null
-  kc -n flux-system wait --for=condition=Available deployment --all --timeout=300s >/dev/null
+  kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f "$manifest" >/dev/null ||
+    { flux_fail "applying the Flux manifest failed"; return 1; }
+  kc wait --for=condition=Established crd -l app.kubernetes.io/part-of=flux --timeout=120s >/dev/null ||
+    { flux_fail "the Flux CRDs are not Established"; return 1; }
+  kc -n flux-system wait --for=condition=Available deployment --all --timeout=300s >/dev/null ||
+    { flux_fail "the Flux controllers are not Available: kubectl -n flux-system get pods"; return 1; }
 
   info "Flux: GitRepository fleet and Kustomization lab"
-  flux_objects "$cfg" | kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f - >/dev/null
-  kc -n flux-system wait --for=condition=Ready gitrepository/fleet --timeout=180s >/dev/null ||
-    printf 'lab: the GitRepository is not Ready yet: kubectl -n flux-system describe gitrepository fleet\n' >&2
+  flux_objects "$cfg" | kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f - >/dev/null ||
+    { flux_fail "applying the GitRepository and the Kustomization failed"; return 1; }
+  kc -n flux-system wait --for=condition=Ready gitrepository/fleet kustomization/lab --timeout=300s >/dev/null ||
+    { flux_fail "the GitRepository fleet or the Kustomization lab is not Ready within 5 minutes: run make lab-flux again, or kubectl -n flux-system describe gitrepository fleet kustomization lab"; return 1; }
   printf '\nFlux %s syncs ./clusters/lab; the root Kustomization is flux-system/lab.\n' "$FLUX_VERSION"
 }
 
@@ -368,13 +393,15 @@ cmd_flux() {
   need terraform jq
   lab_config
   tf_init
-  flux_install ask
+  flux_preflight
+  flux_install ask || die "the Flux step failed: run make lab-flux again"
 }
 
 cmd_up() {
   need terraform jq curl az
   lab_config
   tf_init
+  flux_preflight
   local plan="lab-up.tfplan" rc=0
   info "terraform plan (lab) to $plan"
   tf plan -input=false -detailed-exitcode -out="$plan" || rc=$?

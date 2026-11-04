@@ -98,5 +98,13 @@ jobs:
       - name: shellcheck
         run: shellcheck -x scripts/*.sh
 
+      # scripts/flux.env must match the fleet's scripts/tools.env (same Flux release, checksum and digests): the
+      # test compares them when it finds that file, so fetch it from the fleet's main. A Flux bump therefore lands
+      # in the fleet first, and this check fails on this repository until flux.env follows.
+      - name: Fetch the fleet's pinned tools
+        run: curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/fleet-tools.env" https://raw.githubusercontent.com/pkalin/shadewright-fleet/main/scripts/tools.env
+
       - name: Offline tests
         run: scripts/lab_test.sh
+        env:
+          FLEET_TOOLS_ENV: ${{ runner.temp }}/fleet-tools.env
