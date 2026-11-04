@@ -1,6 +1,7 @@
 # Terraform working data
 .terraform/
-.terraform.nosync/   # a TF_DATA_DIR some machines set to keep providers out of iCloud sync
+# A TF_DATA_DIR some machines set to keep providers out of iCloud sync
+.terraform.nosync/
 .terraform.tfstate.lock.info
 *.tfstate
 *.tfstate.*
