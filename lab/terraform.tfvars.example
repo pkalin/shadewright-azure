@@ -12,3 +12,5 @@ state_backend = {
 # chose: Flux applies whatever lands on its branch.
 # flux_enabled         = true
 # fleet_repository_url = "https://github.com/<you>/shadewright-fleet"
+# Branch Flux tracks. Set to cluster/lab to run the fleet scenarios (default main; the scenario harness refuses main).
+# fleet_branch         = "cluster/lab"

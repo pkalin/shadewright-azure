@@ -84,6 +84,8 @@ cost. Once, fill in the variables:
 cp lab/terraform.tfvars.example lab/terraform.tfvars        # fill in; state_backend matches backend.hcl
 ```
 
+To run the `make scenario-*` targets in `shadewright-fleet`, set `fleet_branch = "cluster/lab"` in `lab/terraform.tfvars` so Flux tracks that branch and the agent's pull requests target it (ADR-0022 in the operator repository). The default `main` makes the scenario harness refuse to run. Changing this value is a Terraform change: it goes through `make lab-plan` and an explicit `yes` like any other.
+
 Then every session is two commands, run from the repository root (`make help` lists them all):
 
 ```bash
