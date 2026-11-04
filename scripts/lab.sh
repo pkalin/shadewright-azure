@@ -3,8 +3,10 @@
 #
 #   scripts/lab.sh plan    plan the lab; changes nothing
 #   scripts/lab.sh up      plan to a file, show it and the cost per hour, ask for "yes", apply that saved plan, then
-#                          install Flux and point it at the fleet when flux_enabled is true
-#   scripts/lab.sh flux    only that Flux step, for a cluster that is up (idempotent: run it again after a failure)
+#                          install Flux and point it at the fleet when flux_enabled is true (when nothing is to
+#                          apply, the Flux step alone, after its own "yes")
+#   scripts/lab.sh flux    only that Flux step, for a cluster that is up, after a "yes" (idempotent: run it again
+#                          after a failure)
 #   scripts/lab.sh down    plan the destroy of `lab` (never foundation or bootstrap), ask for "yes", apply it,
 #                          then run `check`
 #   scripts/lab.sh cost    the lab's price per hour from the Azure Retail Prices API (public, no login)
@@ -12,7 +14,7 @@
 #
 # Reads the subscription and prefix from the git-ignored lab/terraform.tfvars and the state resource group from
 # ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. There is no flag to skip
-# the confirmation: up and down need a terminal and a typed "yes".
+# the confirmation: up, flux and down need a terminal and a typed "yes".
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -31,7 +33,7 @@ prices_api="https://prices.azure.com/api/retail/prices"
 die() { printf 'lab: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
 
-usage() { sed -n '2,15s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,17s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 need() { for c in "$@"; do command -v "$c" >/dev/null || die "$c is not installed"; done; }
 
@@ -225,9 +227,12 @@ sha256_of() {
 }
 
 # flux_prepare <install.yaml> <out>: the release manifest with (1) every controller image pinned by digest
-# (FLUX_IMAGES), (2) --no-cross-namespace-refs on the kustomize, helm and notification controllers, which is the
-# multi-tenancy the AKS extension enforced (every Flux object stays in flux-system and refers to sources there), and
-# (3) the image-reflector, image-automation and source-watcher Deployments left out: the lab uses none of them.
+# (FLUX_IMAGES), (2) the multi-tenancy the AKS extension enables by default (Microsoft Learn, "GitOps with Flux v2",
+# Multi-tenancy): --no-cross-namespace-refs on the kustomize, helm and notification controllers, and
+# --default-service-account=flux-applier on the kustomize and helm controllers, so Flux objects are applied by
+# impersonating the flux-applier ServiceAccount, which gets a cluster-admin binding as the extension's cluster-scope
+# configuration did, and (3) the image-reflector, image-automation and source-watcher Deployments left out: the lab
+# uses none of them.
 flux_prepare() {
   awk -v pins="$FLUX_IMAGES" '
     BEGIN {
@@ -237,6 +242,7 @@ flux_prepare() {
       for (i in d) drop[d[i]] = 1
       split("helm-controller kustomize-controller notification-controller", x, " ")
       for (i in x) noxns[x[i]] = 1
+      defsa["helm-controller"] = 1; defsa["kustomize-controller"] = 1
     }
     function flush() {
       if (doc == "") return
@@ -259,12 +265,21 @@ flux_prepare() {
       }
       doc = doc line "\n"
       if (isdep && ($0 == "        - --watch-all-namespaces") && (name in noxns)) doc = doc "        - --no-cross-namespace-refs=true\n"
+      if (isdep && ($0 == "        - --watch-all-namespaces") && (name in defsa)) doc = doc "        - --default-service-account=flux-applier\n"
     }
-    END { flush(); exit bad }
+    END {
+      flush()
+      printf "---\napiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: flux-applier\n  namespace: flux-system\n"
+      printf "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: ClusterRoleBinding\nmetadata:\n  name: flux-applier\n"
+      printf "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: ClusterRole\n  name: cluster-admin\n"
+      printf "subjects:\n- kind: ServiceAccount\n  name: flux-applier\n  namespace: flux-system\n"
+      exit bad
+    }
   ' "$1" >"$2" || return 1
   # The result is checked, not trusted: four controllers, all pinned, three with the multi-tenancy flag.
   [[ $(grep -c '^kind: Deployment$' "$2") == 4 ]] || { printf 'lab: the Flux manifest does not hold four Deployments\n' >&2; return 1; }
   [[ $(grep -c -- '--no-cross-namespace-refs=true$' "$2") == 3 ]] || { printf 'lab: multi-tenancy flag missing\n' >&2; return 1; }
+  [[ $(grep -c -- '--default-service-account=flux-applier$' "$2") == 2 ]] || { printf 'lab: default service account flag missing\n' >&2; return 1; }
   if grep -E '^[[:space:]]*image:[[:space:]]*[^[:space:]]' "$2" | grep -vqE '@sha256:[0-9a-f]{64}$'; then
     printf 'lab: an image in the Flux manifest is not pinned by digest\n' >&2
     return 1
@@ -312,6 +327,7 @@ flux_validate() {
 
 kc() { kubectl --kubeconfig "$tmp/kubeconfig" "$@"; }
 
+# flux_install [ask]: with an argument, asks for a typed yes first (a step that is not part of an applied plan).
 flux_install() {
   local cfg manifest="$tmp/flux.yaml" i=0
   cfg=$(tf output -json flux) || die "cannot read the flux output of the lab: is the lab applied?"
@@ -321,6 +337,7 @@ flux_install() {
   fi
   need kubectl kubelogin curl jq az awk
   flux_validate "$cfg"
+  [[ -z ${1:-} ]] || confirm "Install Flux $FLUX_VERSION in the running lab cluster and point it at the fleet repository?"
   info "Flux $FLUX_VERSION: download, verify, pin"
   flux_fetch "$manifest"
 
@@ -351,7 +368,7 @@ cmd_flux() {
   need terraform jq
   lab_config
   tf_init
-  flux_install
+  flux_install ask
 }
 
 cmd_up() {
@@ -362,14 +379,14 @@ cmd_up() {
   info "terraform plan (lab) to $plan"
   tf plan -input=false -detailed-exitcode -out="$plan" || rc=$?
   case $rc in
-    0) printf '\nThe lab is up to date: nothing to apply.\n'; flux_install || die "the Flux step failed: run make lab-flux again"; return 0 ;;
+    0) printf '\nThe lab is up to date: nothing to apply.\n'; flux_install ask || die "the Flux step failed: run make lab-flux again"; return 0 ;;
     2) ;;
     *) die "terraform plan failed" ;;
   esac
   plan_summary "$plan"
   # A subshell, because cmd_cost exits through die: a price lookup failure only warns.
   (cmd_cost) || printf 'lab: price lookup failed, check the README cost table\n' >&2
-  confirm "Apply exactly this plan to the lab?"
+  confirm "Apply exactly this plan to the lab (then install Flux, when flux_enabled)?"
   info "terraform apply $plan"
   tf apply -input=false "$plan" ||
     die "terraform apply failed: parts of the lab may be up and billed; run make lab-down or make lab-check"

@@ -90,6 +90,8 @@ out=$(flux_prepare "$work/fake.yaml" "$work/fake.out" 2>&1) || rc=$?
 eq "flux_prepare refuses a manifest without four controllers" "$rc" 1
 eq "flux_prepare pins the image by digest" "$(grep -c 'kustomize-controller:v1.10.1@sha256:a' "$work/fake.out")" 1
 eq "flux_prepare adds the multi-tenancy flag" "$(grep -c -- '--no-cross-namespace-refs=true' "$work/fake.out")" 1
+eq "flux_prepare sets the default service account" "$(grep -c -- '--default-service-account=flux-applier' "$work/fake.out")" 1
+eq "flux_prepare adds flux-applier with cluster-admin" "$(grep -c 'name: flux-applier\|name: cluster-admin' "$work/fake.out")" 4
 eq "flux_prepare drops the image controllers" "$(grep -c 'image-reflector' "$work/fake.out")" 0
 FLUX_IMAGES="kustomize-controller=v1.9.0@sha256:$(printf 'a%.0s' {1..64})"
 rc=0
