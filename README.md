@@ -1,5 +1,9 @@
 <p align="center"><img src=".github/logo.png" alt="Shadewright" width="120"></p>
 
+<p align="center">
+  Part of <a href="https://shadewright.io">Shadewright</a>, a safe-remediation controller for Kubernetes clusters run with GitOps: it turns untrusted proposals, from rules or an LLM, into typed, bounded changes tied to policy and to the object's real source in Git, delivers them only as reviewed pull requests, and verifies the effect.
+</p>
+
 # shadewright-azure
 
 Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a disposable AKS cluster, a model endpoint in Microsoft Foundry, workload identities, and storage for analysis records. Designed to run in a subscription of its own, with a small monthly budget.
