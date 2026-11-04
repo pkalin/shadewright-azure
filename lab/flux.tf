@@ -1,5 +1,5 @@
 # Flux is installed by `scripts/lab.sh up` after the apply (README, "Lab session"), not by Terraform: the AKS
-# Flux extension took over five minutes to create, and a Terraform kubernetes provider would have to be configured
+# Flux extension took 17 minutes to create (2026-11-04), and a Terraform kubernetes provider would have to be configured
 # from the cluster created in the same apply. This output is the one place the values for that step come from:
 # the repository Flux tracks and the substitutions the root Kustomization passes to the fleet's manifests as ${VAR}.
 # null while flux_enabled is false (the default): the script then installs nothing.

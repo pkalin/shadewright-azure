@@ -216,7 +216,7 @@ cmd_plan() {
 }
 
 # --- Flux, installed after the apply (ADR-0022, amended 2026-11-04) -----------------------------------------------
-# Not a Terraform resource: the AKS extension took over five minutes, and a Terraform kubernetes provider would be
+# Not a Terraform resource: the AKS extension took 17 minutes (2026-11-04), and a Terraform kubernetes provider would be
 # configured from the cluster created in the same apply. Everything here is idempotent (server-side apply), so a
 # failed step is repaired by running it again.
 

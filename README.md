@@ -115,9 +115,9 @@ Answering anything but `yes` (lower case) applies nothing, and the saved plan fi
 
 ### Flux
 
-Flux is not an AKS extension and not a Terraform resource: the extension took over five minutes to create after the
+Flux is not an AKS extension and not a Terraform resource: the extension took 17 minutes to create (measured 2026-11-04) after the
 cluster, and a Terraform `kubernetes` provider would have to be configured from a cluster created in the same apply.
-With `flux_enabled = true`, `make lab-up` does it after the apply, in about a minute, from your own kubeconfig
+With `flux_enabled = true`, `make lab-up` does it after the apply, in about two minutes, from your own kubeconfig
 (a private temporary file; yours is not touched). It needs `kubectl`, `kubelogin`, `curl`, `jq` and `az`, and your
 account needs the `Azure Kubernetes Service RBAC Cluster Admin` role that `lab` grants it.
 
