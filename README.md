@@ -8,7 +8,7 @@ Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a 
 | --- | --- | --- |
 | `bootstrap/` | Storage account for Terraform state | Permanent |
 | `foundation/` | VNet, Key Vault (GitHub App key), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
-| `lab/` | AKS, federated credentials for both identities, Flux pointed at the fleet repository | Apply for a session, destroy after |
+| `lab/` | AKS, federated credentials for both identities; the values Flux needs (`make lab-up` then installs Flux pointed at the fleet repository) | Apply for a session, destroy after |
 
 Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shadewright.io).
 
@@ -77,7 +77,7 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
 
 The `lab` root reads the foundation's outputs from its state and creates the AKS cluster, the federated
 credentials of both identities and, with `flux_enabled = true` and `fleet_repository_url` set to your own copy of
-the fleet repository, Flux pointed at its `clusters/lab` (off by default: a bare cluster). Apply it for a session and destroy it after: the node is the main
+the fleet repository, Flux pointed at its `clusters/lab` (off by default: a bare cluster; see "Flux" below). Apply it for a session and destroy it after: the node is the main
 cost. Once, fill in the variables:
 
 ```bash
@@ -101,7 +101,8 @@ make lab-down    # plan the destroy of lab, ask, apply on "yes", then check that
 | Command | What it does | Changes Azure |
 | --- | --- | --- |
 | `make lab-plan` | `terraform plan` of `lab`, nothing saved | No |
-| `make lab-up` | Saves a plan, prints it with a count of creates, updates and deletes (and names every delete or replace), prices the lab, asks; applies exactly the saved plan after a typed `yes` | After `yes` |
+| `make lab-up` | Saves a plan, prints it with a count of creates, updates and deletes (and names every delete or replace), prices the lab, asks; applies exactly the saved plan after a typed `yes`, then installs Flux when `flux_enabled` (see "Flux") | After `yes` |
+| `make lab-flux` | Only the Flux step of `lab-up`, on a cluster that is up and has `flux_enabled = true` | In the cluster only |
 | `make lab-down` | Saves a destroy plan of `lab`, prints it, asks; applies it after a typed `yes`, then runs `lab-check` | After `yes` |
 | `make lab-cost` | Price per hour, per session and per month from the Azure Retail Prices API (public, no login) | No |
 | `make lab-check` | Lists every resource in the subscription by group: lab, foundation, bootstrap, other. Fails while a lab resource group or resource remains, or when anything billed by the hour (VMs, disks, public IPs, load balancers, clusters, NAT gateways, ...) exists outside the lab | No |
@@ -111,6 +112,29 @@ resource group from `backend.hcl`, and prints resource names and types, never ID
 or destroyed: there is no way to point it at `foundation` or `bootstrap`. The confirmation is read from the
 terminal, not from standard input, and there is no flag to skip it, so `yes | make lab-up` and CI cannot apply.
 Answering anything but `yes` (lower case) applies nothing, and the saved plan file is removed on exit either way.
+
+### Flux
+
+Flux is not an AKS extension and not a Terraform resource: the extension took over five minutes to create after the
+cluster, and a Terraform `kubernetes` provider would have to be configured from a cluster created in the same apply.
+With `flux_enabled = true`, `make lab-up` does it after the apply, in about a minute, from your own kubeconfig
+(a private temporary file; yours is not touched). It needs `kubectl`, `kubelogin`, `curl`, `jq` and `az`, and your
+account needs the `Azure Kubernetes Service RBAC Cluster Admin` role that `lab` grants it.
+
+1. Downloads the pinned Flux `install.yaml` (`scripts/flux.env`, the release the fleet's Kind cluster uses), refuses it
+   unless its SHA-256 matches, and pins the four controller images by digest. The image controllers and
+   `source-watcher` are left out: the lab uses none of them.
+2. Adds `--no-cross-namespace-refs=true` to the kustomize, helm and notification controllers (the multi-tenancy the
+   extension enforced): every Flux object stays in `flux-system` and refers to sources there.
+3. Applies it server-side, waits for the controllers, then creates the `GitRepository` `fleet` (the `lab` output's
+   `fleet_branch` of `fleet_repository_url`, every 60 seconds) and the root Kustomization `lab`
+   (`./clusters/lab`, every 2 minutes, with the `postBuild` substitutions from the `flux` output of `lab`).
+
+Everything is a server-side apply, so it is safe to repeat: `make lab-flux` runs just this step on a cluster that is up
+(after a failed download, a slow API server or a timeout), and a second `make lab-up` runs it too. There is no
+`flux bootstrap`: it would commit manifests to the fleet repository, which holds none. The cluster dies with
+`make lab-down`, and so does everything Flux made; nothing outside the cluster is created. Upgrading Flux is a
+change to `scripts/flux.env`, together with the fleet's `scripts/tools.env`.
 
 When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-down` again (a destroy interrupted
 half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after
@@ -172,7 +196,7 @@ checked 2026-11-03:
 | Standard Load Balancer, outbound rule | Load Balancer, Standard Included LB Rules and Outbound Rules (Global) | 0.0224 | 16.35 |
 | Public IPv4 for outbound | Virtual Network, Standard IPv4 Static Public IP | 0.0045 | 3.28 |
 | AKS cluster management, Free tier | none ([pricing tiers](https://learn.microsoft.com/azure/aks/free-standard-pricing-tiers)) | 0 | 0 |
-| Flux extension on AKS | none ([GitOps with Flux v2](https://learn.microsoft.com/azure/azure-arc/kubernetes/conceptual-gitops-flux2)) | 0 | 0 |
+| Flux (four controllers in the cluster, installed by `make lab-up`) | none: runs on the node above | 0 | 0 |
 | **Total** | | **about 0.10** | **about 76** |
 
 An 8-hour session costs about 0.83 EUR; a lab forgotten for a month costs about 76 EUR. Usage-based extras

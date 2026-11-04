@@ -8,7 +8,7 @@ Apply in this order, destroy in reverse:
 
 1. `bootstrap/`: state storage account (Entra-only auth, IP firewall, versioning, delete lock). Stays for the life of the lab.
 2. `foundation/`: Key Vault for the GitHub App key, user-assigned identities for the analyzer and the executor, the model deployment in Microsoft Foundry, the analysis records container (blob, lifecycle retention; must survive the lab), budget alert. Cheap, stays up.
-3. `lab/`: the AKS cluster with its OIDC issuer, federated credentials for both identities, and Flux pointed at `shadewright-fleet`. Disposable: apply for a session, destroy after.
+3. `lab/`: the AKS cluster with its OIDC issuer, federated credentials for both identities, and, when `flux_enabled`, Flux pointed at `shadewright-fleet`. Terraform only outputs what Flux needs (`flux` in `lab/flux.tf`); `scripts/lab.sh up` installs Flux after the apply (pins in `scripts/flux.env`, the same release as the fleet's `scripts/tools.env`: bump both together). No Terraform kubernetes or helm provider, no `flux bootstrap`. Disposable: apply for a session, destroy after.
 
 Each root keeps its state in the bootstrap account under its own key (`<root>.tfstate`) and reads shared values through `terraform_remote_state` or data sources, never by copying IDs.
 
