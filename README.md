@@ -155,6 +155,66 @@ When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-do
 half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after
 checking it is yours.
 
+## Troubleshooting
+
+### AllocationFailed on the node pool
+
+Azure can have no capacity for the node size in the region. On 2026-11-04 `make lab-up` failed after about four
+minutes with `AllocationFailed` for `Standard_B2as_v2` in Sweden Central. The cluster is then left in Azure in
+`Failed` state but is not in the Terraform state (the resource group, the AKS identity and the subnet role
+assignment are). A new plan wants to create the cluster again and fails because it exists, and `make lab-down`
+cannot remove it, because it destroys only what the state holds. `make lab-up` says so when an apply fails.
+
+See the error on the node scale set, in the node resource group (`rg-<prefix>-lab-aks-nodes`):
+
+```bash
+az vmss list --subscription <subscription-id> -g rg-<prefix>-lab-aks-nodes --query '[].name' -o tsv
+az vmss get-instance-view --subscription <subscription-id> -g rg-<prefix>-lab-aks-nodes -n <scale-set-name> \
+  --query 'statuses' -o json
+```
+
+Recover:
+
+1. `make lab-check` lists what is left. Delete the failed cluster:
+   `az aks delete --subscription <subscription-id> -g rg-<prefix>-lab-aks -n <cluster-name> --yes`.
+2. Set another size in the git-ignored `lab/terraform.tfvars`, for example `node_vm_size = "Standard_B2s_v2"`.
+3. `make lab-plan`, read it, then `make lab-up`. Run `make lab-check` after the session as always.
+
+Fallback sizes, Azure Retail Prices API, EUR per hour, Linux pay as you go, `swedencentral`, checked 2026-11-04
+(`make lab-cost` prices the size in your tfvars):
+
+| Size | EUR per hour |
+| --- | ---: |
+| `Standard_B2s_v2` | 0.0776 |
+| `Standard_D2as_v5` | 0.0826 |
+| `Standard_D4as_v5` | 0.1652 |
+
+The default `Standard_B2as_v2` costs 0.0698 (checked 2026-11-03), see "Cost".
+
+### Working from a new network
+
+`admin_ip_cidrs` is the only way through the firewalls of the state storage (bootstrap), Key Vault, Foundry and
+the analysis store (foundation), and of the AKS API server (lab). From a new address every Terraform command fails
+with 403 on the state storage, including the bootstrap plan that would add the address, because bootstrap's own
+state lives behind that firewall. So the first step is outside Terraform. Use your current address
+(`curl -s https://api.ipify.org`), here `<new-ip>`; the storage rule takes no `/32`.
+
+1. Let the address through the state storage firewall. The names are in `backend.hcl`:
+   `az storage account network-rule add --subscription <subscription-id> -g <state-resource-group> --account-name <state-storage-account> --ip-address <new-ip>`
+2. Add `"<new-ip>/32"` to `admin_ip_cidrs` in `bootstrap/terraform.tfvars`, `foundation/terraform.tfvars` and
+   `lab/terraform.tfvars`.
+3. `terraform -chdir=bootstrap plan`: no changes expected on the storage account except that Terraform now
+   finds the rule it would add already there. Read it. Apply only if it shows a change you understand.
+4. `terraform -chdir=foundation plan`, read it (expect in-place updates of the network ACLs, for example Key
+   Vault, Foundry and the analysis store), then `terraform -chdir=foundation apply` after your own yes.
+5. `make lab-plan`, then `make lab-up` (the API server's `authorized_ip_ranges` follows `admin_ip_cidrs`).
+
+To remove a temporary address later: delete it from `admin_ip_cidrs` in all three tfvars, then plan and apply
+foundation, then bootstrap. The rule added with the CLI is not in the state, and the bootstrap apply replaces the
+storage account's rule list with the one in the tfvars, so it disappears there. Run the bootstrap plan from an
+address that is still listed. Check with
+`az storage account show --subscription <subscription-id> -g <state-resource-group> -n <state-storage-account> --query networkRuleSet.ipRules`.
+
 ## Checks
 
 Every pull request runs these workflows. The `main` ruleset requires `Conventional PR title`, `terraform fmt`
