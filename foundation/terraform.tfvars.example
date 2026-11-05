@@ -12,5 +12,6 @@ model_deployments = {
     format  = "OpenAI"
     name    = "gpt-5.4-mini"
     version = "2026-03-17"
+    sku     = "DataZoneStandard" # EU Data Zone processing (#411); GlobalStandard may route outside the EU
   }
 }
