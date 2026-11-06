@@ -14,3 +14,7 @@ state_backend = {
 # fleet_repository_url = "https://github.com/<you>/shadewright-fleet"
 # Branch Flux tracks. Set to cluster/lab to run the fleet scenarios (default main; the scenario harness refuses main).
 # fleet_branch         = "cluster/lab"
+# Required with flux_enabled: the GitHub App the agent opens pull requests with, for the fleet's RemediationSettings.
+# Neither is a secret. The App's private key stays in Key Vault (README "GitHub App key").
+# github_app_client_id       = "Iv23li0000000000000a"
+# github_app_installation_id = 12345678

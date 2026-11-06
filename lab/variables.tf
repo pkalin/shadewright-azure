@@ -70,6 +70,26 @@ variable "fleet_branch" {
   default = "main"
 }
 
+variable "github_app_client_id" {
+  type        = string
+  description = "Client ID of the GitHub App the agent opens pull requests with (App settings page, \"Client ID\"). Not a secret. Passed to Flux for the fleet's RemediationSettings; required when flux_enabled."
+  default     = ""
+  validation {
+    condition     = can(regex("^([A-Za-z0-9.]{8,64})?$", var.github_app_client_id))
+    error_message = "github_app_client_id is letters, digits and dots, 8 to 64 characters (or empty)."
+  }
+}
+
+variable "github_app_installation_id" {
+  type        = number
+  description = "Installation ID of that GitHub App on the fleet repository (the number in settings/installations/<id>). Not a secret. Passed to Flux for the fleet's RemediationSettings; required when flux_enabled."
+  default     = 0
+  validation {
+    condition     = var.github_app_installation_id >= 0 && floor(var.github_app_installation_id) == var.github_app_installation_id
+    error_message = "github_app_installation_id is a whole number (0 means not set)."
+  }
+}
+
 variable "tags" {
   type    = map(string)
   default = { project = "shadewright" }

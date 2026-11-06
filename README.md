@@ -90,12 +90,17 @@ cp lab/terraform.tfvars.example lab/terraform.tfvars        # fill in; state_bac
 
 To run the `make scenario-*` targets in `shadewright-fleet`, set `fleet_branch = "cluster/lab"` in `lab/terraform.tfvars` so Flux tracks that branch and the agent's pull requests target it (ADR-0022 in the operator repository). The default `main` makes the scenario harness refuse to run. Changing this value is a Terraform change: it goes through `make lab-plan` and an explicit `yes` like any other.
 
+With `flux_enabled = true`, also set `github_app_client_id` and `github_app_installation_id` (the GitHub App the agent
+opens pull requests with; neither is a secret). The `flux` output passes them to the fleet with the repository URL, the
+branch and the App key's Key Vault ID, and the fleet renders the agent's `RemediationSettings` from them, so nothing is
+applied by hand after `make lab-up`. The plan refuses `flux_enabled` without them.
+
 Then every session is two commands, run from the repository root (`make help` lists them all):
 
 ```bash
 make lab-up      # init, plan to lab/lab-up.tfplan, plan summary and price per hour, then asks; apply on "yes"
 eval "$(terraform -chdir=lab output -raw get_credentials)"   # kubeconfig for the session
-kubelogin convert-kubeconfig -l azurecli                     # once per kubeconfig
+kubelogin convert-kubeconfig -l azurecli                     # replaces an earlier lab's entry of the same name
 
 # ... work ...
 
