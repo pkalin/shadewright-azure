@@ -24,6 +24,19 @@ output "flux" {
       ANALYSIS_STORE_URL    = local.f.analysis_store.url
       ANALYSIS_CONTAINER    = local.f.analysis_store.container
       OPERATOR_NAMESPACE    = var.operator_namespace
+      # For the fleet's RemediationSettings (infrastructure/shadewright-lab-config): the repository the agent opens
+      # pull requests in and the branch they target, which is the branch Flux tracks (ADR-0022), and the App and
+      # its signing key in Key Vault.
+      FLEET_REPOSITORY_URL       = lower(trimsuffix(var.fleet_repository_url, ".git"))
+      FLEET_BRANCH               = var.fleet_branch
+      GITHUB_APP_CLIENT_ID       = var.github_app_client_id
+      GITHUB_APP_INSTALLATION_ID = tostring(var.github_app_installation_id)
+      GITHUB_APP_KEY_ID          = "${trimsuffix(local.f.key_vault.uri, "/")}/keys/${local.f.key_vault.github_app_key}"
     }
   } : null
+
+  precondition {
+    condition     = !var.flux_enabled || (var.github_app_client_id != "" && var.github_app_installation_id > 0)
+    error_message = "flux_enabled needs github_app_client_id and github_app_installation_id: the fleet's RemediationSettings are rendered from them."
+  }
 }

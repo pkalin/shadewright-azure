@@ -428,7 +428,7 @@ cmd_up() {
   cat <<'EOF'
 
 The lab is up and costs money by the hour. Get a kubeconfig, and destroy it when done:
-  eval "$(terraform -chdir=lab output -raw get_credentials)"
+  eval "$(terraform -chdir=lab output -raw get_credentials)"   # --overwrite-existing: replaces an earlier lab's entry
   kubelogin convert-kubeconfig -l azurecli
   make lab-down
 EOF
