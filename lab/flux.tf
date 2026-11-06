@@ -17,10 +17,13 @@ output "flux" {
       ANALYZER_CLIENT_ID = local.f.analyzer_identity.client_id
       EXECUTOR_CLIENT_ID = local.f.executor_identity.client_id
       MODEL_ENDPOINT     = local.f.model_endpoint
-      KEY_VAULT_URI      = local.f.key_vault.uri
-      ANALYSIS_STORE_URL = local.f.analysis_store.url
-      ANALYSIS_CONTAINER = local.f.analysis_store.container
-      OPERATOR_NAMESPACE = var.operator_namespace
+      # The analyzer's --model-endpoint-suffixes allow-list: "." plus the endpoint host, so it allows this one
+      # resource only (shadewright internal/analyzer/models CheckEndpoint).
+      MODEL_ENDPOINT_SUFFIX = ".${lower(regex("^https://([^/:]+)", local.f.model_endpoint)[0])}"
+      KEY_VAULT_URI         = local.f.key_vault.uri
+      ANALYSIS_STORE_URL    = local.f.analysis_store.url
+      ANALYSIS_CONTAINER    = local.f.analysis_store.container
+      OPERATOR_NAMESPACE    = var.operator_namespace
     }
   } : null
 }
