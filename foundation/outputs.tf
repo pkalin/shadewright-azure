@@ -28,6 +28,14 @@ output "executor_identity" {
   }
 }
 
+output "evaluation_identity" {
+  description = "Evaluation identity: id for the lab's federated credential, client_id for AZURE_CLIENT_ID (the `evaluation` environment's EVAL_AZURE_CLIENT_ID)."
+  value = {
+    id        = azurerm_user_assigned_identity.evaluation.id
+    client_id = azurerm_user_assigned_identity.evaluation.client_id
+  }
+}
+
 output "key_vault" {
   value = {
     name = azurerm_key_vault.this.name

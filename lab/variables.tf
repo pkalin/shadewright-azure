@@ -94,3 +94,15 @@ variable "tags" {
   type    = map(string)
   default = { project = "shadewright" }
 }
+
+variable "evaluation_namespace" {
+  type        = string
+  description = "Namespace of the ServiceAccount whose token signs in as the evaluation identity. Not the operator namespace."
+  default     = "shadewright-eval"
+}
+
+variable "evaluation_service_account" {
+  type        = string
+  description = "ServiceAccount whose token signs in as the evaluation identity."
+  default     = "eval"
+}

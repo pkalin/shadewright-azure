@@ -113,3 +113,25 @@ variable "github_app_key_imported" {
   description = "Set to true once the GitHub App key is imported (README \"GitHub App key\"): grants the executor sign on it."
   default     = false
 }
+
+variable "evaluation_github_repository" {
+  type        = string
+  description = "owner/name of the GitHub repository whose Evaluation workflow may sign in as the evaluation identity."
+  default     = "pkalin/shadewright"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.evaluation_github_repository))
+    error_message = "Use owner/name."
+  }
+}
+
+variable "evaluation_github_environment" {
+  type        = string
+  description = "GitHub environment of the Evaluation workflow; only jobs in it can use the evaluation identity."
+  default     = "evaluation"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._-]+$", var.evaluation_github_environment))
+    error_message = "Use letters, digits, dot, underscore or hyphen."
+  }
+}
