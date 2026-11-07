@@ -28,6 +28,13 @@ output "executor_identity" {
   }
 }
 
+output "evaluation_identity" {
+  description = "Evaluation workflow identity: client_id for the EVAL_AZURE_CLIENT_ID variable of the operator repository's `evaluation` environment."
+  value = {
+    client_id = azurerm_user_assigned_identity.evaluation.client_id
+  }
+}
+
 output "key_vault" {
   value = {
     name = azurerm_key_vault.this.name
