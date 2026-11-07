@@ -29,8 +29,9 @@ output "executor_identity" {
 }
 
 output "evaluation_identity" {
-  description = "Evaluation workflow identity: client_id for the EVAL_AZURE_CLIENT_ID variable of the operator repository's `evaluation` environment."
+  description = "Evaluation identity: id for the lab's federated credential, client_id for AZURE_CLIENT_ID (the `evaluation` environment's EVAL_AZURE_CLIENT_ID)."
   value = {
+    id        = azurerm_user_assigned_identity.evaluation.id
     client_id = azurerm_user_assigned_identity.evaluation.client_id
   }
 }
