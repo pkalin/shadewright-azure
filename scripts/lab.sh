@@ -325,7 +325,7 @@ flux_prepare() {
 flux_fetch() {
   local raw="$tmp/flux-install.yaml" got
   # Each attempt is bounded; retries ride out short outages of the release CDN (503 and 504 on 2026-11-08).
-  curl -fsSL --proto '=https' --connect-timeout 20 --max-time 90 --retry 5 --retry-all-errors --retry-delay 10 -o "$raw" \
+  curl -fsSL --proto '=https' --connect-timeout 20 --max-time 60 --retry 4 --retry-delay 10 -o "$raw" \
     "https://github.com/fluxcd/flux2/releases/download/${FLUX_VERSION}/install.yaml" ||
     die "cannot download the Flux $FLUX_VERSION manifest"
   got=$(sha256_of "$raw")
