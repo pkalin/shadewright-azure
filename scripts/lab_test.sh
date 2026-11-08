@@ -197,4 +197,32 @@ else
   printf 'skip flux.env vs the fleet (no %s)\n' "$fleet_env"
 fi
 
+# --yes: accepted only after up, flux and down; anything else is a usage error.
+pa() { local rc=0; parse_args "$@" || rc=$?; echo "$rc ${command:-} $auto_yes"; }
+eq "parse_args: up alone asks" "$(pa up)" "0 up 0"
+eq "parse_args: up --yes approves" "$(pa up --yes)" "0 up 1"
+eq "parse_args: down --yes approves" "$(pa down --yes)" "0 down 1"
+eq "parse_args: flux --yes approves" "$(pa flux --yes)" "0 flux 1"
+eq "parse_args: no command is help" "$(pa)" "0 help 0"
+eq "parse_args: --yes is refused for plan" "$(pa plan --yes | cut -d' ' -f1)" 2
+eq "parse_args: --yes is refused for check" "$(pa check --yes | cut -d' ' -f1)" 2
+eq "parse_args: an unknown option is refused" "$(pa up -y | cut -d' ' -f1)" 2
+eq "parse_args: yes without dashes is refused" "$(pa down yes | cut -d' ' -f1)" 2
+
+# confirm with --yes approves without a terminal and says so. (Without --yes it reads only /dev/tty, unchanged.)
+eq "confirm approves with --yes, no terminal" "$(auto_yes=1; confirm "Apply?" 2>/dev/null </dev/null && echo ok)" ok
+eq "confirm says it was approved by --yes" "$(auto_yes=1; confirm "Apply?" 2>&1 >/dev/null </dev/null | grep -c 'Approved by --yes')" 1
+
+# plan_deletes counts deletes and replacements, so up --yes can fall back to asking.
+(
+  tf() { cat "$work/plan.json"; }
+  printf '%s' '{"resource_changes":[{"change":{"actions":["create"]}},{"change":{"actions":["update"]}}]}' >"$work/plan.json"
+  eq "plan_deletes is 0 for creates and updates" "$(plan_deletes x)" 0
+  printf '%s' '{"resource_changes":[{"change":{"actions":["delete","create"]}},{"change":{"actions":["delete"]}},{"change":{"actions":["no-op"]}}]}' >"$work/plan.json"
+  eq "plan_deletes counts a replace and a delete" "$(plan_deletes x)" 2
+  printf '%s' '{}' >"$work/plan.json"
+  eq "plan_deletes is 0 for an empty plan" "$(plan_deletes x)" 0
+  exit "$fails"
+) || fails=$((fails + $?))
+
 ((fails == 0)) || { printf '%d failed\n' "$fails"; exit 1; }

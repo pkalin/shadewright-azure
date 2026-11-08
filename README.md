@@ -105,6 +105,8 @@ kubelogin convert-kubeconfig -l azurecli                     # replaces an earli
 # ... work ...
 
 make lab-down    # plan the destroy of lab, ask, apply on "yes", then check that nothing is left
+make lab-up YES=1    # the same without asking (still asks when the plan deletes or replaces anything)
+make lab-down YES=1  # destroy without asking
 ```
 
 | Command | What it does | Changes Azure |
@@ -119,7 +121,10 @@ make lab-down    # plan the destroy of lab, ask, apply on "yes", then check that
 The logic is in `scripts/lab.sh`. It reads the subscription and prefix from `lab/terraform.tfvars` and the state
 resource group from `backend.hcl`, and prints resource names and types, never IDs. Only `lab` is ever planned
 or destroyed: there is no way to point it at `foundation` or `bootstrap`. The confirmation is read from the
-terminal, not from standard input, and there is no flag to skip it, so `yes | make lab-up` and CI cannot apply.
+terminal, not from standard input, so `yes | make lab-up` cannot apply. `YES=1` on the make command line (or `--yes`
+on `scripts/lab.sh up|flux|down`) approves without asking, after printing the plan and the price as usual; `YES` from
+the environment is ignored, and `lab-up YES=1` still asks when the plan deletes or replaces anything, so a drifted
+state cannot quietly replace the cluster. Use it for a session you just decided to start or end, not in automation.
 Answering anything but `yes` (lower case) applies nothing, and the saved plan file is removed on exit either way.
 
 ### Flux

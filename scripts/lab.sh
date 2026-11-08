@@ -13,8 +13,10 @@
 #   scripts/lab.sh check   list what is left in the subscription; fails when anything of the lab remains
 #
 # Reads the subscription and prefix from the git-ignored lab/terraform.tfvars and the state resource group from
-# ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. There is no flag to skip
-# the confirmation: up, flux and down need a terminal and a typed "yes".
+# ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. Up, flux and down need a
+# terminal and a typed "yes", unless the command line says `--yes` (`make lab-up YES=1`): then the plan and the
+# price are still printed and the apply goes ahead without asking, except that `up --yes` still asks for a plan
+# that deletes or replaces anything. Standard input never approves (`yes | make lab-up` does not work).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,13 +29,15 @@ currency=${CURRENCY:-EUR}
 os_disk_tier=${OS_DISK_TIER:-P4}
 session_hours=${SESSION_HOURS:-8}
 prices_api="https://prices.azure.com/api/retail/prices"
+# 1 when the command line said --yes (parse_args); confirm then approves without asking.
+auto_yes=0
 # shellcheck source=scripts/flux.env
 . "$repo/scripts/flux.env"
 
 die() { printf 'lab: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
 
-usage() { sed -n '2,17s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,19s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 need() { for c in "$@"; do command -v "$c" >/dev/null || die "$c is not installed"; done; }
 
@@ -83,9 +87,14 @@ tf_init() {
   tf init -input=false -backend-config=../backend.hcl >/dev/null
 }
 
-# Asks on the terminal, never on stdin, so piped input or `yes |` cannot approve an apply.
+# Asks on the terminal, never on stdin, so piped input or `yes |` cannot approve an apply. With --yes on the
+# command line it approves without asking and says so.
 confirm() {
   local answer
+  if [[ $auto_yes == 1 ]]; then
+    printf '\n%s Approved by --yes.\n' "$1" >&2
+    return 0
+  fi
   { exec 3</dev/tty; } 2>/dev/null || die "no terminal to ask for confirmation: run this interactively"
   printf '\n%s Type yes to continue: ' "$1" >/dev/tty
   IFS= read -r answer <&3 || answer=
@@ -104,6 +113,29 @@ plan_summary() {
       + "\($c | map(select(.change.actions | index("delete"))) | length) to delete or replace."
     , ($c[] | select(.change.actions | index("delete")) | "  delete: \(.address) \(.change.actions | join("/"))")
   ' <<<"$json"
+}
+
+# Number of resources a saved plan deletes or replaces.
+plan_deletes() {
+  tf show -json "$1" | jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length'
+}
+
+# The command and its options: `<command> [--yes]`. Sets $command and auto_yes; --yes only for up, flux and down.
+parse_args() {
+  command=${1:-help}
+  [[ $# -gt 0 ]] && shift
+  auto_yes=0
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --yes) auto_yes=1 ;;
+      *) return 2 ;;
+    esac
+    shift
+  done
+  case $command in
+    up | flux | down) ;;
+    *) [[ $auto_yes == 0 ]] || return 2 ;;
+  esac
 }
 
 # One price from the Retail Prices API: filter, then a jq selector over .Items. Follows NextPageLink.
@@ -419,6 +451,10 @@ cmd_up() {
   plan_summary "$plan"
   # A subshell, because cmd_cost exits through die: a price lookup failure only warns.
   (cmd_cost) || printf 'lab: price lookup failed, check the README cost table\n' >&2
+  if [[ $auto_yes == 1 ]] && [[ $(plan_deletes "$plan") != 0 ]]; then
+    printf '\nlab: --yes does not approve a plan that deletes or replaces anything; asking instead.\n' >&2
+    auto_yes=0
+  fi
   confirm "Apply exactly this plan to the lab (then install Flux, when flux_enabled)?"
   info "terraform apply $plan"
   tf apply -input=false "$plan" ||
@@ -466,7 +502,8 @@ tmp=$(mktemp -d)
 # The only cleanup of the saved plans, on every exit.
 trap 'rm -rf "$tmp"; rm -f "$lab_dir/lab-up.tfplan" "$lab_dir/lab-down.tfplan"' EXIT
 
-case ${1:-help} in
+parse_args "$@" || { usage >&2; exit 2; }
+case $command in
   plan) cmd_plan ;;
   up) cmd_up ;;
   down) cmd_down ;;
