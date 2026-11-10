@@ -54,7 +54,7 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
 1. **Create the App** (GitHub, Settings, Developer settings, GitHub Apps, New GitHub App):
    - Homepage URL: your fork's docs or repository URL.
    - Webhook: untick **Active**. The operator never receives inbound calls.
-   - Repository permissions: **Contents** read and write, **Pull requests** read and write, **Issues** read and write. **Metadata** read-only is added automatically. Nothing else, no organization or account permissions.
+   - Repository permissions: **Contents** read and write, **Pull requests** read and write, **Issues** read and write, **Checks** read and write (the check run `shadewright/review` for reviewer hints; the executor names this permission in every token request, so an App without it gets no token). **Metadata** read-only is added automatically. Nothing else, no organization or account permissions.
    - Where can this App be installed: **Only on this account**.
 2. **Generate a private key** on the App's page. A `.pem` file downloads.
 3. **Install the App** on your account with **Only select repositories**: the fleet repository alone.
@@ -75,7 +75,7 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
    scripts/github-app-check.sh "$KV" <client-id>
    ```
 
-   Expect your App's name, the three write permissions plus metadata, no events, and one installation with `selected` repositories.
+   Expect your App's name, the four write permissions (contents, pull requests, issues, checks) plus metadata, no events, and one installation with `selected` repositories.
 
 ## Lab session
 
