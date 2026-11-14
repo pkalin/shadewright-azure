@@ -48,7 +48,7 @@ It is delivered as a Helm chart. The page
 That gives two rows:
 
 - Installed through a Flux `HelmRelease`, a broken limit is refused by the source mapping with `HelmManaged`
-  (operator ADR-0012: Helm values are not supported).
+  ([operator ADR-0012](https://shadewright.io/adr/0012-object-to-source-mapping/): Helm values are not supported).
 - Rendered into plain YAML, committed, and applied by a Flux `Kustomization`, the same break can reach a pull
   request. The rendered output is large, so it also meets the render check's limits (`TooLarge`; see the matrix).
 
@@ -73,15 +73,15 @@ symptom and the Incident only.
 
 The Demo documents 6 GB of free RAM for the application and Kubernetes 1.24 or later (Kubernetes deployment page,
 above). The chart sets memory limits and no requests. Summing the limits of the enabled components in
-chart 0.42.6 (`charts/opentelemetry-demo/values.yaml` of `open-telemetry/opentelemetry-helm-charts`, checked
-2026-11-14) gives about 6.2 GiB, plus 0.4 GiB for the collector, 0.5 GiB for Grafana and 1.1 GiB for OpenSearch. Jaeger
+chart 0.42.6 ([`charts/opentelemetry-demo/values.yaml`](https://github.com/open-telemetry/opentelemetry-helm-charts/blob/opentelemetry-demo-0.42.6/charts/opentelemetry-demo/values.yaml)
+of `open-telemetry/opentelemetry-helm-charts` at tag `opentelemetry-demo-0.42.6`, checked 2026-11-14) gives about 6.2 GiB, plus 0.4 GiB for the collector, 0.5 GiB for Grafana and 1.1 GiB for OpenSearch. Jaeger
 and Prometheus set none. Argo CD, Flux's controllers and the Shadewright agent come on top. These are limits, not
 measured use, so the real figure must be read from a first run before the size is fixed.
 
 The first lab's node (`Standard_B2as_v2`, 2 vCPU, 8 GiB) is too small for that. Proposal: one
 `Standard_D4as_v5` node (4 vCPU, 16 GiB, not burstable), the size the README already lists as a fallback.
 Two `Standard_D2as_v5` nodes (2 vCPU, 8 GiB each) cost the same and are the alternative if one node proves hard to
-get in the region. Sweden Central stays the region (operator ADR-0016).
+get in the region. Sweden Central stays the region ([operator ADR-0016](https://shadewright.io/adr/0016-lab-region-sweden-central/)).
 
 ## Price
 
@@ -110,14 +110,14 @@ The 32 GB OS disk is the first lab's setting and is assumed here. Rerun `make la
 
 ## Lifetime and the credit cap
 
-The cluster exists for a session and is destroyed after it, as ADR-0008 and the first lab do: apply, run the rows,
+The cluster exists for a session and is destroyed after it, as [ADR-0008](https://shadewright.io/adr/0008-disposable-azure-lab/) and the first lab do: apply, run the rows,
 destroy, and check that nothing is left (`make lab-check`). It gets its own Terraform root or a switch in `lab/`;
 that choice belongs to the Terraform task.
 
 The constraint is the lab's monthly credit. The repository states it as a rule (AGENTS.md, "Cost": the lab must
 stay well inside a small monthly credit), and `foundation/variables.tf` sets an alert budget of 50 per month by
 default, in the subscription's billing currency. An Azure budget only alerts, it never stops spending. The amount of
-the credit itself is not written in this repository. At 0.1992 EUR per hour, a second cluster left up for a month
+the credit itself is not written in this repository, so this note compares against the alert default only. At 0.1992 EUR per hour, a second cluster left up for a month
 (730 hours) would cost about 145 EUR, three times that alert level, so the destroy step is not optional. Eight
 sessions of 4 hours cost about 6.40 EUR.
 
