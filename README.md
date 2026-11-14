@@ -167,6 +167,23 @@ change to `scripts/flux.env`, together with the fleet's `scripts/tools.env`: `sc
 bump the fleet first. A lab applied with the AKS extension (before this change) must be destroyed first
 (`make lab-down`); applying this version on top would destroy the extension and its configuration in the plan.
 
+### Model API key
+
+The analyzer can call the Anthropic API instead of Microsoft Foundry (ADR-0037 in the operator repository). That API
+takes a static key, and `make lab-up` can put it into the cluster, from a file outside every repository:
+
+```bash
+LAB_ANTHROPIC_KEY_FILE=~/path/to/anthropic.key make lab-up    # also read by make lab-flux
+```
+
+With the variable set, the Flux step creates the namespace `shadewright-system` (Flux applies the fleet's own
+Namespace over it) and the Secret `shadewright-anthropic` with the single key `api-key`, taken from that file; a second
+run updates it. Unset, nothing happens. A missing or empty file stops `up` and `flux` before anything is billed, and so
+does `flux_enabled = false`. The key never goes through Terraform (no variable, no state, no output) and is never
+printed: `kubectl` reads the file itself. The Secret goes with the cluster, so `make lab-down` and `make lab-check` need
+no change. Use a dedicated workspace at the vendor with a spend limit, a key made for the lab only, and revoke the key
+when the lab is no longer needed: the limit bounds what a leaked key can cost, the Secret does not.
+
 When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-down` again (a destroy interrupted
 half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after
 checking it is yours.
