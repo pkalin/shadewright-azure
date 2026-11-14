@@ -16,6 +16,8 @@ Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a 
 
 Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shadewright.io).
 
+Design notes: [a second lab cluster](docs/second-lab-cluster.md) (planned, not built).
+
 ## Prerequisites
 
 - Terraform (version in `.terraform-version`, `tfenv` picks it up), Azure CLI, logged in with `az login`, plus `jq`,
