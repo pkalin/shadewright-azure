@@ -16,7 +16,8 @@
 # ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. Up, flux and down need a
 # terminal and a typed "yes", unless the command line says `--yes` (`make lab-up YES=1`): then the plan and the
 # price are still printed and the apply goes ahead without asking, except that `up --yes` still asks for a plan
-# that deletes or replaces anything. Standard input never approves (`yes | make lab-up` does not work).
+# that deletes or replaces anything. Setting LAB_ANTHROPIC_KEY_FILE to a file that holds a model API key makes the
+# Flux step create the Secret shadewright-anthropic in shadewright-system from it (README, "Model API key"). Standard input never approves (`yes | make lab-up` does not work).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -373,6 +374,35 @@ flux_preflight() {
   flux_fetch "$tmp/flux.yaml"
 }
 
+# The optional model API key (ADR-0037, decision 7). LAB_ANTHROPIC_KEY_FILE names a file that holds the key; unset
+# means nothing happens and nothing is printed. The key is never read into a shell variable, never goes through
+# Terraform and is never printed: kubectl reads the file itself. A bad file stops `up` and `flux` before anything is
+# billed; the messages name the variable, never the path or the content.
+anthropic_key_check() {
+  [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || return 0
+  [[ -f $LAB_ANTHROPIC_KEY_FILE && -r $LAB_ANTHROPIC_KEY_FILE && -s $LAB_ANTHROPIC_KEY_FILE ]] ||
+    die "LAB_ANTHROPIC_KEY_FILE is set but is not a readable, non-empty file"
+  [[ $(setting lab flux_enabled) == true ]] ||
+    die "LAB_ANTHROPIC_KEY_FILE is set but flux_enabled is false: the lab has no fleet to use the key"
+}
+
+# anthropic_key_secret: creates or updates Secret shadewright-anthropic (key api-key) in shadewright-system. The
+# namespace is created here, plainly, before Flux applies the fleet: the fleet's own Namespace object (Pod Security
+# labels, prune disabled) is then applied over it by Flux, and the Secret is there when the agent starts. Called as
+# `anthropic_key_secret || ...`: every step ends in `|| return 1`.
+anthropic_key_secret() {
+  [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || return 0
+  anthropic_key_check || return 1
+  info "Model API key: Secret shadewright-anthropic in shadewright-system"
+  kc create namespace shadewright-system --dry-run=client -o yaml |
+    kc apply --server-side --field-manager=shadewright-lab -f - >/dev/null ||
+    { flux_fail "creating the namespace shadewright-system failed"; return 1; }
+  kc -n shadewright-system create secret generic shadewright-anthropic \
+    --from-file=api-key="$LAB_ANTHROPIC_KEY_FILE" --dry-run=client -o yaml |
+    kc apply --server-side --field-manager=shadewright-lab -f - >/dev/null ||
+    { flux_fail "creating the Secret shadewright-anthropic failed"; return 1; }
+}
+
 # flux_fail <message>: the one way out of flux_install on an error.
 flux_fail() { printf 'lab: %s\n' "$1" >&2; return 1; }
 
@@ -406,6 +436,8 @@ flux_install() {
     sleep "${FLUX_POLL:-5}"
   done
 
+  anthropic_key_secret || return 1
+
   info "Flux: install"
   kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f "$manifest" >/dev/null ||
     { flux_fail "applying the Flux manifest failed"; return 1; }
@@ -425,6 +457,7 @@ flux_install() {
 cmd_flux() {
   need terraform jq
   lab_config
+  anthropic_key_check
   tf_init
   flux_preflight
   flux_install ask || die "the Flux step failed: run make lab-flux again"
@@ -439,6 +472,7 @@ apply_failed_hint() {
 cmd_up() {
   need terraform jq curl az
   lab_config
+  anthropic_key_check
   tf_init
   flux_preflight
   local plan="lab-up.tfplan" rc=0

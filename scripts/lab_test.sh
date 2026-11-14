@@ -175,6 +175,44 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   exit "$fails"
 ) || fails=$?
 
+# The optional model API key: unset does nothing and prints nothing; a valid file reaches kubectl as a path, never as
+# content; an empty or missing file fails without printing the content. kubectl is a stub that records its arguments.
+(
+  tmp=$work/ak
+  mkdir -p "$tmp"
+  secret_text="sk-test-$$-not-a-real-key"
+  printf '%s\n' "$secret_text" >"$work/key.txt"
+  : >"$work/empty.txt"
+  calls=$tmp/calls
+  setting() { echo "${test_flux:-true}"; }
+  kubectl() {
+    printf '%s\n' "$*" >>"$calls"
+    case " $* " in
+      *" apply "*) cat >/dev/null ;;
+      *) echo "kind: stub" ;;
+    esac
+  }
+  : >"$calls"
+  rc=0; out=$(unset LAB_ANTHROPIC_KEY_FILE; anthropic_key_check 2>&1 && anthropic_key_secret 2>&1) || rc=$?
+  eq "key: unset prints nothing, calls nothing" "$rc [$out] $(wc -l <"$calls" | tr -d ' ')" "0 [] 0"
+  rc=0; out=$(LAB_ANTHROPIC_KEY_FILE=$work/key.txt anthropic_key_check 2>&1 && LAB_ANTHROPIC_KEY_FILE=$work/key.txt anthropic_key_secret 2>&1) || rc=$?
+  eq "key: a valid file succeeds" "$rc" 0
+  eq "key: kubectl gets the file as a path" "$(grep -c -- "create secret generic shadewright-anthropic .*--from-file=api-key=$work/key.txt" "$calls")" 1
+  eq "key: the Secret goes to shadewright-system" "$(grep -c -- '-n shadewright-system create secret' "$calls")" 1
+  eq "key: the content is in no argument and not printed" "$( { cat "$calls"; echo "$out"; } | grep -c -- "$secret_text")" 0
+  : >"$calls"
+  rc=0; out=$( (LAB_ANTHROPIC_KEY_FILE=$work/empty.txt anthropic_key_check) 2>&1) || rc=$?
+  eq "key: an empty file fails" "$rc" 1
+  eq "key: the failure names the variable" "$(grep -c 'LAB_ANTHROPIC_KEY_FILE' <<<"$out")" 1
+  rc=0; out=$( (LAB_ANTHROPIC_KEY_FILE=$work/none.txt anthropic_key_check) 2>&1) || rc=$?
+  eq "key: a missing file fails" "$rc" 1
+  rc=0; out=$( (LAB_ANTHROPIC_KEY_FILE=$work/empty.txt anthropic_key_secret) 2>&1) || rc=$?
+  eq "key: the Secret step refuses an empty file, no kubectl call" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
+  rc=0; out=$( (test_flux=false LAB_ANTHROPIC_KEY_FILE=$work/key.txt anthropic_key_check) 2>&1) || rc=$?
+  eq "key: refused when flux_enabled is false" "$rc" 1
+  exit "$fails"
+) || fails=$?
+
 hint=$(apply_failed_hint)
 eq "failed-apply hint mentions a cluster outside the state" "$(grep -c 'outside the Terraform state' <<<"$hint")" 1
 eq "failed-apply hint points at make lab-check" "$(grep -c 'make lab-check' <<<"$hint")" 1
