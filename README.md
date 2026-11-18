@@ -11,7 +11,7 @@ Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a 
 | Root | What | Lifetime |
 | --- | --- | --- |
 | `bootstrap/` | Storage account for Terraform state | Permanent |
-| `foundation/` | VNet, Key Vault (GitHub App key), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
+| `foundation/` | VNet, Key Vault (GitHub App key, model API key secrets), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
 | `lab/` | AKS, federated credentials for both identities; the values Flux needs (`make lab-up` then installs Flux pointed at the fleet repository) | Apply for a session, destroy after |
 
 Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shadewright.io).
@@ -78,6 +78,25 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
    ```
 
    Expect your App's name, the four write permissions (contents, pull requests, issues, checks) plus metadata, no events, and one installation with `selected` repositories.
+
+## Model API keys
+
+The Anthropic and OpenAI API keys of the lab are kept as secrets in the foundation's Key Vault, `anthropic-api-key` and `openai-api-key` (the names are in `terraform -chdir=foundation output key_vault`, field `model_key_secrets`). Terraform never holds the values: it only gives you, the operator running it, the role `Key Vault Secrets Officer` on the vault, and you set each secret once by hand, as with the GitHub App key. Nothing else can read them: the executor's role has one data action, sign, on the one key, and the analyzer has no role on the vault.
+
+Set a secret from a file, so the value is on no command line and not in the output (`--query id -o tsv` prints only the secret's ID), then delete the file:
+
+```bash
+KV=$(terraform -chdir=foundation output -json key_vault | jq -r .name)
+az keyvault secret set --vault-name "$KV" --name anthropic-api-key --file ~/path/to/anthropic.key \
+  --encoding utf-8 --query id -o tsv
+az keyvault secret set --vault-name "$KV" --name openai-api-key --file ~/path/to/openai.key \
+  --encoding utf-8 --query id -o tsv
+rm ~/path/to/anthropic.key ~/path/to/openai.key
+```
+
+To rotate, make a new key at the vendor, run the same `az keyvault secret set` (it adds a new version, the old one stays until you disable it), then revoke the old key at the vendor. A lab run reads the current version.
+
+`LAB_MODEL_KEYS_FROM_VAULT=true make lab-up` (also `make lab-flux`) downloads the Anthropic secret into a private temporary file (`az keyvault secret download --file`), uses it as `LAB_ANTHROPIC_KEY_FILE` (see "Model API key" below) and removes the file when the script exits. The value is never read into a shell variable, never on a command line and never printed. A missing secret or a refused read (no `az login`, a network outside `admin_ip_cidrs`) stops `up` before anything is billed, and the message names the variable and the secret. Setting both `LAB_MODEL_KEYS_FROM_VAULT` and `LAB_ANTHROPIC_KEY_FILE` is an error. The OpenAI secret is stored in the vault by this setup but no script reads it yet: the fleet has no consumer for it.
 
 ## Lab session
 
@@ -170,7 +189,8 @@ bump the fleet first. A lab applied with the AKS extension (before this change) 
 ### Model API key
 
 The analyzer can call the Anthropic API instead of Microsoft Foundry (ADR-0037 in the operator repository). That API
-takes a static key, and `make lab-up` can put it into the cluster, from a file outside every repository:
+takes a static key, and `make lab-up` can put it into the cluster, from a file outside every repository (or from the
+Key Vault, see "Model API keys" above):
 
 ```bash
 LAB_ANTHROPIC_KEY_FILE=~/path/to/anthropic.key make lab-up    # also read by make lab-flux

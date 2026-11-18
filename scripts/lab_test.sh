@@ -213,6 +213,83 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   exit "$fails"
 ) || fails=$?
 
+# LAB_MODEL_KEYS_FROM_VAULT: the key is downloaded by az into a private file that the exit trap removes; both
+# variables set is an error; a failed read stops before anything is billed; nothing of the value is printed or put on a
+# command line. terraform and az are stubs; az writes the fake secret to the --file it is given.
+(
+  tmp=$work/vk
+  mkdir -p "$tmp"
+  subscription=s
+  umask 077 # as lab.sh sets it; az writes the file under it
+  secret_text="sk-test-$$-vault-not-a-real-key"
+  calls=$tmp/calls
+  : >"$calls"
+  setting() { echo "${test_flux:-true}"; }
+  need() { :; }
+  foundation_tf() {
+    [[ $vfail == tf ]] && return 1
+    [[ $1 == init ]] && return 0
+    printf '%s' '{"name":"kv-test","uri":"https://kv-test.vault.azure.net/","github_app_key":"github-app","model_key_secrets":{"anthropic":"anthropic-api-key","openai":"openai-api-key"}}'
+  }
+  az() {
+    printf '%s\n' "$*" >>"$calls"
+    [[ $vfail == az ]] && { echo "ERROR: $secret_text" >&2; return 1; }
+    local file=
+    while [[ $# -gt 0 ]]; do [[ $1 == --file ]] && file=$2; shift; done
+    [[ ! -e $file ]] || return 1 # the real command refuses an existing file as well
+    printf '%s\n' "$secret_text" >"$file"
+  }
+  vfail=none
+  rc=0; out=$(unset LAB_MODEL_KEYS_FROM_VAULT LAB_ANTHROPIC_KEY_FILE; model_keys_from_vault 2>&1) || rc=$?
+  eq "vault key: unset does nothing, calls nothing" "$rc [$out] $(wc -l <"$calls" | tr -d ' ')" "0 [] 0"
+  rc=0; out=$(LAB_MODEL_KEYS_FROM_VAULT=false model_keys_from_vault 2>&1) || rc=$?
+  eq "vault key: false does nothing" "$rc [$out] $(wc -l <"$calls" | tr -d ' ')" "0 [] 0"
+  rc=0; out=$( (LAB_MODEL_KEYS_FROM_VAULT=yes model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: a value other than true is refused" "$rc" 1
+  rc=0; out=$( (LAB_MODEL_KEYS_FROM_VAULT=true LAB_ANTHROPIC_KEY_FILE=$work/key.txt model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: both variables set is an error, no az call" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
+  eq "vault key: the both-set error names both variables" "$(grep -c 'LAB_MODEL_KEYS_FROM_VAULT and LAB_ANTHROPIC_KEY_FILE' <<<"$out")" 1
+  rc=0; out=$( (test_flux=false LAB_MODEL_KEYS_FROM_VAULT=true model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: refused when flux_enabled is false" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
+
+  # Success, run in the shell itself (not a subshell): the variable must be set for the next step, and the file must
+  # be gone once the trap's rm has run.
+  export LAB_MODEL_KEYS_FROM_VAULT=true
+  unset LAB_ANTHROPIC_KEY_FILE
+  rc=0; model_keys_from_vault >"$tmp/out" 2>&1 || rc=$?
+  eq "vault key: a successful read" "$rc" 0
+  eq "vault key: LAB_ANTHROPIC_KEY_FILE is set" "$([[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] && echo yes)" yes
+  eq "vault key: the file is under the private tmp" "$([[ $LAB_ANTHROPIC_KEY_FILE == "$tmp"/* ]] && echo yes)" yes
+  eq "vault key: the file holds the secret" "$(cat "$LAB_ANTHROPIC_KEY_FILE")" "$secret_text"
+  eq "vault key: the file is private (mode 600)" "$(stat -c %a "$LAB_ANTHROPIC_KEY_FILE" 2>/dev/null || stat -f %Lp "$LAB_ANTHROPIC_KEY_FILE")" 600
+  eq "vault key: the existing check accepts the file" "$(anthropic_key_check >/dev/null 2>&1 && echo ok)" ok
+  eq "vault key: az gets the vault, the secret name and --file" "$(grep -c -- 'keyvault secret download --vault-name kv-test --name anthropic-api-key --file .* --encoding utf-8' "$calls")" 1
+  eq "vault key: the OpenAI secret is not read" "$(grep -c openai "$calls")" 0
+  eq "vault key: nothing of the value in output or arguments" "$( { cat "$tmp/out" "$calls"; } | grep -c -- "$secret_text")" 0
+  # The exit trap of lab.sh removes $tmp, which holds the private directory: the same call here, then the check.
+  key_path=$LAB_ANTHROPIC_KEY_FILE
+  rm -rf "$tmp"
+  eq "vault key: the temp file is removed with the tmp dir on exit" "$([[ -e $key_path ]] && echo present || echo gone)" gone
+  eq "vault key: lab.sh's exit trap removes \$tmp" "$(grep -c "trap 'rm -rf \"\$tmp\"" "$here/lab.sh")" 1
+
+  # A failed read stops, names the variable and the secret, and leaks nothing, whatever the cause.
+  mkdir -p "$tmp"; : >"$calls"
+  unset LAB_ANTHROPIC_KEY_FILE
+  vfail=az
+  rc=0; out=$( (model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: a refused read stops" "$rc" 1
+  eq "vault key: the failure names the variable and the secret" "$(grep -c 'LAB_MODEL_KEYS_FROM_VAULT: cannot read the secret anthropic-api-key' <<<"$out")" 1
+  eq "vault key: the failure prints nothing of the value" "$(grep -c -- "$secret_text" <<<"$out")" 0
+  vfail=tf
+  rc=0; out=$( (model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: an unreadable foundation output stops, as an error to retry" "$rc $(grep -c retry <<<"$out")" "1 1"
+
+  # Order: up and flux run the vault step before the plan and before the Flux step, so a failure bills nothing.
+  eq "vault key: cmd_up reads the vault before terraform init" "$(awk '/^cmd_up\(\)/,/^}/' "$here/lab.sh" | grep -n 'model_keys_from_vault\|tf_init' | cut -d: -f2 | tr -d ' ' | tr '\n' ' ')" "model_keys_from_vault tf_init "
+  eq "vault key: cmd_flux reads the vault before terraform init" "$(awk '/^cmd_flux\(\)/,/^}/' "$here/lab.sh" | grep -n 'model_keys_from_vault\|tf_init' | cut -d: -f2 | tr -d ' ' | tr '\n' ' ')" "model_keys_from_vault tf_init "
+  exit "$fails"
+) || fails=$?
+
 hint=$(apply_failed_hint)
 eq "failed-apply hint mentions a cluster outside the state" "$(grep -c 'outside the Terraform state' <<<"$hint")" 1
 eq "failed-apply hint points at make lab-check" "$(grep -c 'make lab-check' <<<"$hint")" 1

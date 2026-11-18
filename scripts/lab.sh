@@ -17,7 +17,9 @@
 # terminal and a typed "yes", unless the command line says `--yes` (`make lab-up YES=1`): then the plan and the
 # price are still printed and the apply goes ahead without asking, except that `up --yes` still asks for a plan
 # that deletes or replaces anything. Setting LAB_ANTHROPIC_KEY_FILE to a file that holds a model API key makes the
-# Flux step create the Secret shadewright-anthropic in shadewright-system from it (README, "Model API key"). Standard input never approves (`yes | make lab-up` does not work).
+# Flux step create the Secret shadewright-anthropic in shadewright-system from it (README, "Model API key").
+# LAB_MODEL_KEYS_FROM_VAULT=true does the same with the key kept in the foundation's Key Vault (README, "Model API
+# keys"); setting both variables is an error. Standard input never approves (`yes | make lab-up` does not work).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -386,6 +388,43 @@ anthropic_key_check() {
     die "LAB_ANTHROPIC_KEY_FILE is set but flux_enabled is false: the lab has no fleet to use the key"
 }
 
+foundation_tf() { terraform -chdir="$repo/foundation" "$@"; }
+
+# The optional LAB_MODEL_KEYS_FROM_VAULT=true (README, "Model API keys"): when LAB_ANTHROPIC_KEY_FILE is unset, the
+# Anthropic key is downloaded from the foundation's Key Vault into a private file under $tmp (umask 077, removed by
+# the exit trap) and LAB_ANTHROPIC_KEY_FILE is pointed at it, so the path below is the same as for a file the operator
+# made. The value is never read into a shell variable, never on a command line, never printed. Runs before anything
+# is billed: a missing secret or a refused read stops `up` and `flux`. The messages name the variable and the secret
+# name, never the vault, the path or the content. The OpenAI key is kept in the same vault but no step uses it yet.
+model_keys_from_vault() {
+  case ${LAB_MODEL_KEYS_FROM_VAULT:-} in
+    "" | false) return 0 ;;
+    true) ;;
+    *) die "LAB_MODEL_KEYS_FROM_VAULT must be true or unset" ;;
+  esac
+  [[ -z ${LAB_ANTHROPIC_KEY_FILE:-} ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT and LAB_ANTHROPIC_KEY_FILE are both set: use one"
+  [[ $(setting lab flux_enabled) == true ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT is set but flux_enabled is false: the lab has no fleet to use the key"
+  need az jq terraform
+  local out vault secret dir
+  foundation_tf init -input=false -backend-config=../backend.hcl >/dev/null ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: cannot initialise the foundation root to find the vault: retry"
+  out=$(foundation_tf output -json key_vault) ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the foundation's key_vault output: is the foundation applied? retry"
+  vault=$(jq -r '.name // empty' <<<"$out")
+  secret=$(jq -r '.model_key_secrets.anthropic // empty' <<<"$out")
+  [[ -n $vault && -n $secret ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: the foundation's key_vault output has no vault or no model key secret name: apply the foundation first"
+  dir=$(umask 077; mktemp -d "$tmp/vault-key.XXXXXX") || die "cannot create a private directory for the key"
+  # --file must not exist yet. The value goes from Azure to the file; stdout and stderr are dropped, so a failure
+  # cannot leak anything and the cause (absent secret, no role, firewall) is not told apart.
+  az keyvault secret download --vault-name "$vault" --name "$secret" --file "$dir/anthropic-api-key" \
+    --encoding utf-8 --subscription "$subscription" >/dev/null 2>&1 ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the secret $secret from the foundation's Key Vault: set it once (README, Model API keys), check az login and that your IP is in admin_ip_cidrs, then retry"
+  LAB_ANTHROPIC_KEY_FILE="$dir/anthropic-api-key"
+}
+
 # anthropic_key_secret: creates or updates Secret shadewright-anthropic (key api-key) in shadewright-system. The
 # namespace is created here, plainly, before Flux applies the fleet: the fleet's own Namespace object (Pod Security
 # labels, prune disabled) is then applied over it by Flux, and the Secret is there when the agent starts. Called as
@@ -457,6 +496,7 @@ flux_install() {
 cmd_flux() {
   need terraform jq
   lab_config
+  model_keys_from_vault
   anthropic_key_check
   tf_init
   flux_preflight
@@ -472,6 +512,7 @@ apply_failed_hint() {
 cmd_up() {
   need terraform jq curl az
   lab_config
+  model_keys_from_vault
   anthropic_key_check
   tf_init
   flux_preflight
