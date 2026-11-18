@@ -264,7 +264,7 @@ eq "cmd_flux checks both keys before the plan" "$(awk '/^cmd_flux\(\)/,/^}/' "$h
   az() {
     printf '%s\n' "$*" >>"$calls"
     [[ $vfail == az ]] && { echo "ERROR: $secret_text" >&2; return 1; }
-    local file= name=
+    local file='' name=''
     while [[ $# -gt 0 ]]; do [[ $1 == --file ]] && file=$2; [[ $1 == --name ]] && name=$2; shift; done
     case " $vabsent " in
       *" $name "*) echo "ERROR: (SecretNotFound) A secret with name $name was not found in this key vault." >&2; return 1 ;;
@@ -332,7 +332,7 @@ eq "cmd_flux checks both keys before the plan" "$(awk '/^cmd_flux\(\)/,/^}/' "$h
   rc=0; out=$( (model_keys_from_vault) 2>&1) || rc=$?
   eq "vault key: neither secret present is an error naming both" "$rc $(grep -c 'neither model key secret is in the Key Vault' <<<"$out") $(grep -c skipped <<<"$out")" "1 1 2"
   vabsent=
-  # A refused read of the second secret is an error to retry, not a skip.
+  # A refused read (not SecretNotFound) is an error to retry, not a skip.
   unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE
   vfail=az
   rc=0; out=$( (model_keys_from_vault) 2>&1) || rc=$?
