@@ -16,10 +16,10 @@
 # ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. Up, flux and down need a
 # terminal and a typed "yes", unless the command line says `--yes` (`make lab-up YES=1`): then the plan and the
 # price are still printed and the apply goes ahead without asking, except that `up --yes` still asks for a plan
-# that deletes or replaces anything. Setting LAB_ANTHROPIC_KEY_FILE to a file that holds a model API key makes the
-# Flux step create the Secret shadewright-anthropic in shadewright-system from it (README, "Model API key").
-# LAB_MODEL_KEYS_FROM_VAULT=true does the same with the key kept in the foundation's Key Vault (README, "Model API
-# keys"); setting both variables is an error. Standard input never approves (`yes | make lab-up` does not work).
+# that deletes or replaces anything. Setting LAB_ANTHROPIC_KEY_FILE or LAB_OPENAI_KEY_FILE to a file that holds a
+# model API key makes the Flux step create the Secret shadewright-anthropic or shadewright-openai in shadewright-system
+# from it (README, "Model API key"). LAB_MODEL_KEYS_FROM_VAULT=true does the same with the keys kept in the
+# foundation's Key Vault (README, "Model API keys"); setting it together with a file variable is an error. Standard input never approves (`yes | make lab-up` does not work).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -376,26 +376,50 @@ flux_preflight() {
   flux_fetch "$tmp/flux.yaml"
 }
 
-# The optional model API key (ADR-0037, decision 7). LAB_ANTHROPIC_KEY_FILE names a file that holds the key; unset
-# means nothing happens and nothing is printed. The key is never read into a shell variable, never goes through
-# Terraform and is never printed: kubectl reads the file itself. A bad file stops `up` and `flux` before anything is
-# billed; the messages name the variable, never the path or the content.
-anthropic_key_check() {
-  [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || return 0
-  [[ -f $LAB_ANTHROPIC_KEY_FILE && -r $LAB_ANTHROPIC_KEY_FILE && -s $LAB_ANTHROPIC_KEY_FILE ]] ||
-    die "LAB_ANTHROPIC_KEY_FILE is set but is not a readable, non-empty file"
+# The optional model API keys (ADR-0037 decision 7 for Anthropic, ADR-0042 for OpenAI). LAB_ANTHROPIC_KEY_FILE and
+# LAB_OPENAI_KEY_FILE each name a file that holds one key; unset means nothing happens and nothing is printed. A key is
+# never read into a shell variable, never goes through Terraform and is never printed: kubectl reads the file itself.
+# A bad file stops `up` and `flux` before anything is billed; the messages name the variable, never the path or the
+# content. Both keys share the code below.
+# model_key_check <file variable>
+model_key_check() {
+  local var=$1
+  [[ -n ${!var:-} ]] || return 0
+  [[ -f ${!var} && -r ${!var} && -s ${!var} ]] ||
+    die "$var is set but is not a readable, non-empty file"
   [[ $(setting lab flux_enabled) == true ]] ||
-    die "LAB_ANTHROPIC_KEY_FILE is set but flux_enabled is false: the lab has no fleet to use the key"
+    die "$var is set but flux_enabled is false: the lab has no fleet to use the key"
 }
+anthropic_key_check() { model_key_check LAB_ANTHROPIC_KEY_FILE; }
+openai_key_check() { model_key_check LAB_OPENAI_KEY_FILE; }
 
 foundation_tf() { terraform -chdir="$repo/foundation" "$@"; }
 
-# The optional LAB_MODEL_KEYS_FROM_VAULT=true (README, "Model API keys"): when LAB_ANTHROPIC_KEY_FILE is unset, the
-# Anthropic key is downloaded from the foundation's Key Vault into a private file under $tmp (umask 077, removed by
-# the exit trap) and LAB_ANTHROPIC_KEY_FILE is pointed at it, so the path below is the same as for a file the operator
-# made. The value is never read into a shell variable, never on a command line, never printed. Runs before anything
-# is billed: a missing secret or a refused read stops `up` and `flux`. The messages name the variable and the secret
-# name, never the vault, the path or the content. The OpenAI key is kept in the same vault but no step uses it yet.
+# The optional LAB_MODEL_KEYS_FROM_VAULT=true (README, "Model API keys"): each key is downloaded from the foundation's
+# Key Vault into a private file under $tmp (umask 077, removed by the exit trap) and its file variable is pointed at
+# it, so the path below is the same as for a file the operator made. The value is never read into a shell variable,
+# never on a command line, never printed. Runs before anything is billed: a refused read stops `up` and `flux`. A
+# secret that is absent from the vault (Azure answers SecretNotFound) is skipped with one line naming it; when neither
+# is there, that is an error. The messages name the variable and the secret name, never the vault, the path or the
+# content.
+# vault_key_download <file variable> <secret name> <vault> <dir>: returns 0 when downloaded, 1 when the secret is absent.
+vault_key_download() {
+  local var=$1 secret=$2 vault=$3 dir=$4 err
+  err="$dir/$secret.err"
+  # --file must not exist yet. The value goes from Azure to the file; stdout is dropped and stderr goes to a private
+  # file that is only searched, never printed, so a failure cannot leak anything.
+  if az keyvault secret download --vault-name "$vault" --name "$secret" --file "$dir/$secret" \
+    --encoding utf-8 --subscription "$subscription" >/dev/null 2>"$err"; then
+    printf -v "$var" '%s' "$dir/$secret"
+    export "${var?}"
+    return 0
+  fi
+  # Only a definite "absent" skips; any other failure (no login, firewall, no role) is an error to retry.
+  ! grep -q SecretNotFound "$err" ||
+    return 1
+  die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the secret $secret from the foundation's Key Vault: set it once (README, Model API keys), check az login and that your IP is in admin_ip_cidrs, then retry"
+}
+
 model_keys_from_vault() {
   case ${LAB_MODEL_KEYS_FROM_VAULT:-} in
     "" | false) return 0 ;;
@@ -404,43 +428,56 @@ model_keys_from_vault() {
   esac
   [[ -z ${LAB_ANTHROPIC_KEY_FILE:-} ]] ||
     die "LAB_MODEL_KEYS_FROM_VAULT and LAB_ANTHROPIC_KEY_FILE are both set: use one"
+  [[ -z ${LAB_OPENAI_KEY_FILE:-} ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT and LAB_OPENAI_KEY_FILE are both set: use one"
   [[ $(setting lab flux_enabled) == true ]] ||
     die "LAB_MODEL_KEYS_FROM_VAULT is set but flux_enabled is false: the lab has no fleet to use the key"
   need az jq terraform
-  local out vault secret dir
+  local out vault dir found=0 provider var secret
   foundation_tf init -input=false -backend-config=../backend.hcl >/dev/null ||
     die "LAB_MODEL_KEYS_FROM_VAULT: cannot initialise the foundation root to find the vault: retry"
   out=$(foundation_tf output -json key_vault) ||
     die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the foundation's key_vault output: is the foundation applied? retry"
   vault=$(jq -r '.name // empty' <<<"$out")
-  secret=$(jq -r '.model_key_secrets.anthropic // empty' <<<"$out")
-  [[ -n $vault && -n $secret ]] ||
-    die "LAB_MODEL_KEYS_FROM_VAULT: the foundation's key_vault output has no vault or no model key secret name: apply the foundation first"
+  [[ -n $vault ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: the foundation's key_vault output has no vault name: apply the foundation first"
   dir=$(umask 077; mktemp -d "$tmp/vault-key.XXXXXX") || die "cannot create a private directory for the key"
-  # --file must not exist yet. The value goes from Azure to the file; stdout and stderr are dropped, so a failure
-  # cannot leak anything and the cause (absent secret, no role, firewall) is not told apart.
-  az keyvault secret download --vault-name "$vault" --name "$secret" --file "$dir/anthropic-api-key" \
-    --encoding utf-8 --subscription "$subscription" >/dev/null 2>&1 ||
-    die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the secret $secret from the foundation's Key Vault: set it once (README, Model API keys), check az login and that your IP is in admin_ip_cidrs, then retry"
-  LAB_ANTHROPIC_KEY_FILE="$dir/anthropic-api-key"
+  for provider in anthropic openai; do
+    case $provider in
+      anthropic) var=LAB_ANTHROPIC_KEY_FILE ;;
+      openai) var=LAB_OPENAI_KEY_FILE ;;
+    esac
+    secret=$(jq -r --arg p "$provider" '.model_key_secrets[$p] // empty' <<<"$out")
+    [[ -n $secret ]] ||
+      die "LAB_MODEL_KEYS_FROM_VAULT: the foundation's key_vault output has no name for the $provider key secret: apply the foundation first"
+    if vault_key_download "$var" "$secret" "$vault" "$dir"; then
+      found=1
+    else
+      info "LAB_MODEL_KEYS_FROM_VAULT: the secret $secret is not in the Key Vault: skipped"
+    fi
+  done
+  ((found == 1)) || die "LAB_MODEL_KEYS_FROM_VAULT: neither model key secret is in the Key Vault: set one (README, Model API keys)"
 }
 
-# anthropic_key_secret: creates or updates Secret shadewright-anthropic (key api-key) in shadewright-system. The
-# namespace is created here, plainly, before Flux applies the fleet: the fleet's own Namespace object (Pod Security
+# model_key_secret <file variable> <Secret name>: creates or updates the Secret (key api-key) in shadewright-system.
+# The namespace is created here, plainly, before Flux applies the fleet: the fleet's own Namespace object (Pod Security
 # labels, prune disabled) is then applied over it by Flux, and the Secret is there when the agent starts. Called as
 # `anthropic_key_secret || ...`: every step ends in `|| return 1`.
-anthropic_key_secret() {
-  [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || return 0
-  anthropic_key_check || return 1
-  info "Model API key: Secret shadewright-anthropic in shadewright-system"
+model_key_secret() {
+  local var=$1 name=$2
+  [[ -n ${!var:-} ]] || return 0
+  model_key_check "$var" || return 1
+  info "Model API key: Secret $name in shadewright-system"
   kc create namespace shadewright-system --dry-run=client -o yaml |
     kc apply --server-side --field-manager=shadewright-lab -f - >/dev/null ||
     { flux_fail "creating the namespace shadewright-system failed"; return 1; }
-  kc -n shadewright-system create secret generic shadewright-anthropic \
-    --from-file=api-key="$LAB_ANTHROPIC_KEY_FILE" --dry-run=client -o yaml |
+  kc -n shadewright-system create secret generic "$name" \
+    --from-file=api-key="${!var}" --dry-run=client -o yaml |
     kc apply --server-side --field-manager=shadewright-lab -f - >/dev/null ||
-    { flux_fail "creating the Secret shadewright-anthropic failed"; return 1; }
+    { flux_fail "creating the Secret $name failed"; return 1; }
 }
+anthropic_key_secret() { model_key_secret LAB_ANTHROPIC_KEY_FILE shadewright-anthropic; }
+openai_key_secret() { model_key_secret LAB_OPENAI_KEY_FILE shadewright-openai; }
 
 # flux_fail <message>: the one way out of flux_install on an error.
 flux_fail() { printf 'lab: %s\n' "$1" >&2; return 1; }
@@ -476,6 +513,7 @@ flux_install() {
   done
 
   anthropic_key_secret || return 1
+  openai_key_secret || return 1
 
   info "Flux: install"
   kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f "$manifest" >/dev/null ||
@@ -498,6 +536,7 @@ cmd_flux() {
   lab_config
   model_keys_from_vault
   anthropic_key_check
+  openai_key_check
   tf_init
   flux_preflight
   flux_install ask || die "the Flux step failed: run make lab-flux again"
@@ -514,6 +553,7 @@ cmd_up() {
   lab_config
   model_keys_from_vault
   anthropic_key_check
+  openai_key_check
   tf_init
   flux_preflight
   local plan="lab-up.tfplan" rc=0

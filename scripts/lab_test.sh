@@ -175,6 +175,12 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   exit "$fails"
 ) || fails=$?
 
+# The two Secret steps flux_install runs, in its order (checked below against lab.sh).
+flux_install_keys() { anthropic_key_secret || return 1; openai_key_secret || return 1; }
+eq "flux_install makes both key Secrets, Anthropic first" "$(awk '/^flux_install\(\)/,/^}/' "$here/lab.sh" | grep -o '^  [a-z]*_key_secret' | tr -d ' ' | tr '\n' ' ')" "anthropic_key_secret openai_key_secret "
+eq "cmd_up checks both keys before the plan" "$(awk '/^cmd_up\(\)/,/^}/' "$here/lab.sh" | grep -o '^  [a-z]*_key_check' | tr -d ' ' | tr '\n' ' ')" "anthropic_key_check openai_key_check "
+eq "cmd_flux checks both keys before the plan" "$(awk '/^cmd_flux\(\)/,/^}/' "$here/lab.sh" | grep -o '^  [a-z]*_key_check' | tr -d ' ' | tr '\n' ' ')" "anthropic_key_check openai_key_check "
+
 # The optional model API key: unset does nothing and prints nothing; a valid file reaches kubectl as a path, never as
 # content; an empty or missing file fails without printing the content. kubectl is a stub that records its arguments.
 (
@@ -185,6 +191,7 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   : >"$work/empty.txt"
   calls=$tmp/calls
   setting() { echo "${test_flux:-true}"; }
+  # shellcheck disable=SC2329 # called through kc in lab.sh
   kubectl() {
     printf '%s\n' "$*" >>"$calls"
     case " $* " in
@@ -198,6 +205,7 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   rc=0; out=$(LAB_ANTHROPIC_KEY_FILE=$work/key.txt anthropic_key_check 2>&1 && LAB_ANTHROPIC_KEY_FILE=$work/key.txt anthropic_key_secret 2>&1) || rc=$?
   eq "key: a valid file succeeds" "$rc" 0
   eq "key: kubectl gets the file as a path" "$(grep -c -- "create secret generic shadewright-anthropic .*--from-file=api-key=$work/key.txt" "$calls")" 1
+  eq "key: the Anthropic file does not make an OpenAI Secret" "$(grep -c shadewright-openai "$calls")" 0
   eq "key: the Secret goes to shadewright-system" "$(grep -c -- '-n shadewright-system create secret' "$calls")" 1
   eq "key: the content is in no argument and not printed" "$( { cat "$calls"; echo "$out"; } | grep -c -- "$secret_text")" 0
   : >"$calls"
@@ -210,6 +218,29 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   eq "key: the Secret step refuses an empty file, no kubectl call" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
   rc=0; out=$( (test_flux=false LAB_ANTHROPIC_KEY_FILE=$work/key.txt anthropic_key_check) 2>&1) || rc=$?
   eq "key: refused when flux_enabled is false" "$rc" 1
+
+  # The OpenAI key goes through the same code: its own variable, its own Secret.
+  : >"$calls"
+  rc=0; out=$(unset LAB_OPENAI_KEY_FILE; openai_key_check 2>&1 && openai_key_secret 2>&1) || rc=$?
+  eq "openai key: unset prints nothing, calls nothing" "$rc [$out] $(wc -l <"$calls" | tr -d ' ')" "0 [] 0"
+  rc=0; out=$(LAB_OPENAI_KEY_FILE=$work/key.txt openai_key_check 2>&1 && LAB_OPENAI_KEY_FILE=$work/key.txt openai_key_secret 2>&1) || rc=$?
+  eq "openai key: a valid file succeeds" "$rc" 0
+  eq "openai key: kubectl gets the file as a path, Secret shadewright-openai" "$(grep -c -- "create secret generic shadewright-openai .*--from-file=api-key=$work/key.txt" "$calls")" 1
+  eq "openai key: the Secret goes to shadewright-system" "$(grep -c -- '-n shadewright-system create secret' "$calls")" 1
+  eq "openai key: the OpenAI file does not make an Anthropic Secret" "$(grep -c shadewright-anthropic "$calls")" 0
+  eq "openai key: the content is in no argument and not printed" "$( { cat "$calls"; echo "$out"; } | grep -c -- "$secret_text")" 0
+  rc=0; out=$( (LAB_OPENAI_KEY_FILE=$work/empty.txt openai_key_check) 2>&1) || rc=$?
+  eq "openai key: an empty file fails, naming the variable" "$rc $(grep -c 'LAB_OPENAI_KEY_FILE' <<<"$out")" "1 1"
+  rc=0; out=$( (LAB_OPENAI_KEY_FILE=$work/none.txt openai_key_check) 2>&1) || rc=$?
+  eq "openai key: a missing file fails" "$rc" 1
+  : >"$calls"
+  rc=0; out=$( (LAB_OPENAI_KEY_FILE=$work/empty.txt openai_key_secret) 2>&1) || rc=$?
+  eq "openai key: the Secret step refuses an empty file, no kubectl call" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
+  rc=0; out=$( (test_flux=false LAB_OPENAI_KEY_FILE=$work/key.txt openai_key_check) 2>&1) || rc=$?
+  eq "openai key: refused when flux_enabled is false" "$rc" 1
+  : >"$calls"
+  rc=0; out=$(LAB_ANTHROPIC_KEY_FILE=$work/key.txt LAB_OPENAI_KEY_FILE=$work/key.txt flux_install_keys 2>&1) || rc=$?
+  eq "both keys: two Secrets are made" "$rc $(grep -c 'create secret generic' "$calls")" "0 2"
   exit "$fails"
 ) || fails=$?
 
@@ -234,13 +265,17 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   az() {
     printf '%s\n' "$*" >>"$calls"
     [[ $vfail == az ]] && { echo "ERROR: $secret_text" >&2; return 1; }
-    local file=
-    while [[ $# -gt 0 ]]; do [[ $1 == --file ]] && file=$2; shift; done
+    local file='' name=''
+    while [[ $# -gt 0 ]]; do [[ $1 == --file ]] && file=$2; [[ $1 == --name ]] && name=$2; shift; done
+    case " $vabsent " in
+      *" $name "*) echo "ERROR: (SecretNotFound) A secret with name $name was not found in this key vault." >&2; return 1 ;;
+    esac
     [[ ! -e $file ]] || return 1 # the real command refuses an existing file as well
     printf '%s\n' "$secret_text" >"$file"
   }
   vfail=none
-  rc=0; out=$(unset LAB_MODEL_KEYS_FROM_VAULT LAB_ANTHROPIC_KEY_FILE; model_keys_from_vault 2>&1) || rc=$?
+  vabsent=
+  rc=0; out=$(unset LAB_MODEL_KEYS_FROM_VAULT LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE; model_keys_from_vault 2>&1) || rc=$?
   eq "vault key: unset does nothing, calls nothing" "$rc [$out] $(wc -l <"$calls" | tr -d ' ')" "0 [] 0"
   rc=0; out=$(LAB_MODEL_KEYS_FROM_VAULT=false model_keys_from_vault 2>&1) || rc=$?
   eq "vault key: false does nothing" "$rc [$out] $(wc -l <"$calls" | tr -d ' ')" "0 [] 0"
@@ -249,32 +284,57 @@ eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1)
   rc=0; out=$( (LAB_MODEL_KEYS_FROM_VAULT=true LAB_ANTHROPIC_KEY_FILE=$work/key.txt model_keys_from_vault) 2>&1) || rc=$?
   eq "vault key: both variables set is an error, no az call" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
   eq "vault key: the both-set error names both variables" "$(grep -c 'LAB_MODEL_KEYS_FROM_VAULT and LAB_ANTHROPIC_KEY_FILE' <<<"$out")" 1
+  rc=0; out=$( (LAB_MODEL_KEYS_FROM_VAULT=true LAB_OPENAI_KEY_FILE=$work/key.txt model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: an OpenAI file with the vault is an error, no az call" "$rc $(wc -l <"$calls" | tr -d ' ') $(grep -c 'LAB_MODEL_KEYS_FROM_VAULT and LAB_OPENAI_KEY_FILE' <<<"$out")" "1 0 1"
   rc=0; out=$( (test_flux=false LAB_MODEL_KEYS_FROM_VAULT=true model_keys_from_vault) 2>&1) || rc=$?
   eq "vault key: refused when flux_enabled is false" "$rc $(wc -l <"$calls" | tr -d ' ')" "1 0"
 
   # Success, run in the shell itself (not a subshell): the variable must be set for the next step, and the file must
   # be gone once the trap's rm has run.
   export LAB_MODEL_KEYS_FROM_VAULT=true
-  unset LAB_ANTHROPIC_KEY_FILE
+  unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE
   rc=0; model_keys_from_vault >"$tmp/out" 2>&1 || rc=$?
   eq "vault key: a successful read" "$rc" 0
+  eq "vault key: LAB_OPENAI_KEY_FILE is set, under the private tmp, holding the secret, mode 600" "$([[ $LAB_OPENAI_KEY_FILE == "$tmp"/* ]] && [[ $(cat "$LAB_OPENAI_KEY_FILE") == "$secret_text" ]] && [[ $(stat -c %a "$LAB_OPENAI_KEY_FILE" 2>/dev/null || stat -f %Lp "$LAB_OPENAI_KEY_FILE") == 600 ]] && echo yes)" yes
+  eq "vault key: the OpenAI check accepts the file" "$(openai_key_check >/dev/null 2>&1 && echo ok)" ok
+  eq "vault key: az reads the OpenAI secret by name" "$(grep -c -- 'keyvault secret download --vault-name kv-test --name openai-api-key --file .* --encoding utf-8' "$calls")" 1
+  eq "vault key: no skip line when both are there" "$(grep -c skipped "$tmp/out")" 0
   eq "vault key: LAB_ANTHROPIC_KEY_FILE is set" "$([[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] && echo yes)" yes
   eq "vault key: the file is under the private tmp" "$([[ $LAB_ANTHROPIC_KEY_FILE == "$tmp"/* ]] && echo yes)" yes
   eq "vault key: the file holds the secret" "$(cat "$LAB_ANTHROPIC_KEY_FILE")" "$secret_text"
   eq "vault key: the file is private (mode 600)" "$(stat -c %a "$LAB_ANTHROPIC_KEY_FILE" 2>/dev/null || stat -f %Lp "$LAB_ANTHROPIC_KEY_FILE")" 600
   eq "vault key: the existing check accepts the file" "$(anthropic_key_check >/dev/null 2>&1 && echo ok)" ok
   eq "vault key: az gets the vault, the secret name and --file" "$(grep -c -- 'keyvault secret download --vault-name kv-test --name anthropic-api-key --file .* --encoding utf-8' "$calls")" 1
-  eq "vault key: the OpenAI secret is not read" "$(grep -c openai "$calls")" 0
   eq "vault key: nothing of the value in output or arguments" "$( { cat "$tmp/out" "$calls"; } | grep -c -- "$secret_text")" 0
   # The exit trap of lab.sh removes $tmp, which holds the private directory: the same call here, then the check.
   key_path=$LAB_ANTHROPIC_KEY_FILE
+  key_path2=$LAB_OPENAI_KEY_FILE
   rm -rf "$tmp"
+  eq "vault key: the OpenAI temp file is removed too" "$([[ -e $key_path2 ]] && echo present || echo gone)" gone
   eq "vault key: the temp file is removed with the tmp dir on exit" "$([[ -e $key_path ]] && echo present || echo gone)" gone
   eq "vault key: lab.sh's exit trap removes \$tmp" "$(grep -c "trap 'rm -rf \"\$tmp\"" "$here/lab.sh")" 1
 
   # A failed read stops, names the variable and the secret, and leaks nothing, whatever the cause.
   mkdir -p "$tmp"; : >"$calls"
-  unset LAB_ANTHROPIC_KEY_FILE
+  unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE
+  # One secret absent: skipped with one line naming it, the other is used.
+  vabsent=openai-api-key
+  rc=0; model_keys_from_vault >"$tmp/out" 2>&1 || rc=$?
+  eq "vault key: an absent OpenAI secret is skipped, not an error" "$rc" 0
+  eq "vault key: one line names the skipped secret" "$(grep -c 'openai-api-key is not in the Key Vault: skipped' "$tmp/out") $(grep -c skipped "$tmp/out")" "1 1"
+  eq "vault key: the Anthropic key is still set, the OpenAI one is not" "$([[ -n ${LAB_ANTHROPIC_KEY_FILE:-} && -z ${LAB_OPENAI_KEY_FILE:-} ]] && echo yes)" yes
+  unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE
+  vabsent=anthropic-api-key
+  rc=0; model_keys_from_vault >"$tmp/out" 2>&1 || rc=$?
+  eq "vault key: an absent Anthropic secret is skipped, not an error" "$rc $(grep -c 'anthropic-api-key is not in the Key Vault: skipped' "$tmp/out")" "0 1"
+  eq "vault key: the OpenAI key is set, the Anthropic one is not" "$([[ -z ${LAB_ANTHROPIC_KEY_FILE:-} && -n ${LAB_OPENAI_KEY_FILE:-} ]] && echo yes)" yes
+  unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE
+  vabsent="anthropic-api-key openai-api-key"
+  rc=0; out=$( (model_keys_from_vault) 2>&1) || rc=$?
+  eq "vault key: neither secret present is an error naming both" "$rc $(grep -c 'neither model key secret is in the Key Vault' <<<"$out") $(grep -c skipped <<<"$out")" "1 1 2"
+  vabsent=
+  # A refused read (not SecretNotFound) is an error to retry, not a skip.
+  unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE
   vfail=az
   rc=0; out=$( (model_keys_from_vault) 2>&1) || rc=$?
   eq "vault key: a refused read stops" "$rc" 1
