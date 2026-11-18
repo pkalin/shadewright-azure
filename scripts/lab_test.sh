@@ -138,6 +138,7 @@ eq "flux_validate refuses an odd branch" "$( (flux_validate "$bad" >/dev/null 2>
 bad=$(jq '.repository_url = "http://example.org/o/r"' <<<"$cfg")
 eq "flux_validate refuses plain http" "$( (flux_validate "$bad" >/dev/null 2>&1) && echo ok || echo refused)" refused
 
+provider=foundry # the provider flux_install writes and checks
 # flux_install is called as `flux_install || die`, where set -e is off: a failing step must still make it return
 # non-zero, and it must not claim success. Every external command is a stub; $failing names the one that breaks.
 (
@@ -383,6 +384,155 @@ eq "parse_args: --yes is refused for plan" "$(pa plan --yes | cut -d' ' -f1)" 2
 eq "parse_args: --yes is refused for check" "$(pa check --yes | cut -d' ' -f1)" 2
 eq "parse_args: an unknown option is refused" "$(pa up -y | cut -d' ' -f1)" 2
 eq "parse_args: yes without dashes is refused" "$(pa down yes | cut -d' ' -f1)" 2
+
+# The model provider (LAB_MODEL_PROVIDER, README "Model provider"): validated before anything is billed, written to the
+# cluster as a ConfigMap, switched on a running lab by a reconcile and read back from the cluster. kubectl is a stub.
+(
+  unset LAB_MODEL_PROVIDER
+  provider_check; eq "provider: unset is foundry" "$provider" foundry
+  LAB_MODEL_PROVIDER=anthropic provider_check; eq "provider: anthropic is accepted" "$provider" anthropic
+  LAB_MODEL_PROVIDER=openai provider_check; eq "provider: openai is accepted" "$provider" openai
+  for bad in Foundry azure "foundry " "" "openai;x"; do
+    rc=0; out=$( (LAB_MODEL_PROVIDER=$bad provider_check) 2>&1) || rc=$?
+    if [[ -z $bad ]]; then
+      eq "provider: an empty value is foundry" "$rc" 0
+    else
+      eq "provider: '$bad' is refused, the value is not echoed" "$rc $(grep -c -F -- "$bad" <<<"$out")" "1 0"
+    fi
+  done
+  # Before anything is billed: up and flux validate right after lab_config, before the vault, the plan and the Flux download.
+  eq "cmd_up validates the provider before the vault, init and any plan" "$(awk '/^cmd_up\(\)/,/^}/' "$here/lab.sh" | grep -n 'provider_check\|provider_needs_key\|model_keys_from_vault\|tf_init\|tf plan' | cut -d: -f2 | tr -d ' ' | cut -c1-24 | tr '\n' ' ')" "provider_check model_keys_from_vault provider_needs_key tf_init tfplan-input=false-detai "
+
+  eq "cmd_flux validates the provider before init" "$(awk '/^cmd_flux\(\)/,/^}/' "$here/lab.sh" | grep -n 'provider_check\|tf_init' | cut -d: -f2 | tr -d ' ' | tr '\n' ' ')" "provider_check tf_init "
+  eq "cmd_provider validates the provider before init" "$(awk '/^cmd_provider\(\)/,/^}/' "$here/lab.sh" | grep -n 'provider_check\|tf_init' | cut -d: -f2 | tr -d ' ' | tr '\n' ' ')" "provider_check tf_init "
+
+  # up needs the provider's key before billing; foundry needs none.
+  provider=foundry; rc=0; (unset LAB_ANTHROPIC_KEY_FILE LAB_OPENAI_KEY_FILE; provider_needs_key) >/dev/null 2>&1 || rc=$?
+  eq "provider key: foundry needs no key" "$rc" 0
+  provider=anthropic; rc=0; out=$( (unset LAB_ANTHROPIC_KEY_FILE; LAB_OPENAI_KEY_FILE=x provider_needs_key) 2>&1) || rc=$?
+  eq "provider key: anthropic without its file is an error naming it (the OpenAI file does not help)" "$rc $(grep -c LAB_ANTHROPIC_KEY_FILE <<<"$out")" "1 1"
+  provider=openai; rc=0; out=$( (unset LAB_OPENAI_KEY_FILE; LAB_ANTHROPIC_KEY_FILE=x provider_needs_key) 2>&1) || rc=$?
+  eq "provider key: openai without its file is an error naming it" "$rc $(grep -c LAB_OPENAI_KEY_FILE <<<"$out")" "1 1"
+  provider=openai; rc=0; (LAB_OPENAI_KEY_FILE=x provider_needs_key) >/dev/null 2>&1 || rc=$?
+  eq "provider key: openai with its file passes" "$rc" 0
+
+  # The root Kustomization reads the optional ConfigMap.
+  objs=$(flux_objects "$cfg")
+  eq "flux_objects: the root reads the ConfigMap lab-model-provider, optional" "$(jq -c '.items[1].spec.postBuild.substituteFrom' <<<"$objs")" '[{"kind":"ConfigMap","name":"lab-model-provider","optional":true}]'
+  eq "flux_objects: the substitutions of Terraform are still passed" "$(jq -r '.items[1].spec.postBuild.substitute | length > 0' <<<"$objs")" true
+
+  tmp=$work/pv
+  mkdir -p "$tmp"
+  calls=$tmp/calls
+  : >"$calls"
+  FLUX_POLL=0
+  PROVIDER_POLL_TRIES=3
+  info() { :; }
+  # shellcheck disable=SC2329 # called through kc in lab.sh
+  kubectl() {
+    printf '%s\n' "$*" >>"$calls"
+    case " $* " in
+      *" get secret "*) echo "$stub_err" >&2; return "$stub_secret_rc" ;;
+      *" create configmap "*) echo "kind: ConfigMap" ;;
+      *" apply "*) cat >/dev/null ;;
+      *" annotate "*) token=${*##*requestedAt=}; return 0 ;;
+      *"lastHandledReconcileAt"*) [[ $stub_handled == same ]] && printf '%s' "$token" || printf 'old'; return "$stub_get_rc" ;;
+      *"get kustomization shadewright -o"*) printf '%s' "$stub_path" ;;
+      *"get kustomization shadewright-config -o"*) printf '%s' "$stub_path" ;;
+      *"get remediationsettings"*"provider"*) printf '%s' "$stub_settings" ;;
+      *"get remediationsettings"*) printf 'deployment-x' ;;
+    esac
+    return 0
+  }
+
+  provider=foundry; : >"$calls"
+  rc=0; provider_secret_check || rc=$?
+  eq "provider secret: foundry reads nothing" "$rc $(wc -l <"$calls" | tr -d ' ')" "0 0"
+  provider=anthropic; stub_secret_rc=0; stub_err=
+  rc=0; provider_secret_check || rc=$?
+  eq "provider secret: present passes, the right Secret is read" "$rc $(grep -c 'get secret shadewright-anthropic' "$calls")" "0 1"
+  provider=openai; stub_secret_rc=1; stub_err='Error from server (NotFound): secrets "shadewright-openai" not found'
+  rc=0; out=$(provider_secret_check 2>&1) || rc=$?
+  eq "provider secret: NotFound refuses, naming the Secret" "$rc $(grep -c 'shadewright-openai' <<<"$out") $(grep -c 'retry' <<<"$out")" "1 1 0"
+  stub_err='Unable to connect to the server: dial tcp: i/o timeout'
+  rc=0; out=$(provider_secret_check 2>&1) || rc=$?
+  eq "provider secret: a failed read is an error to retry, not 'absent'" "$rc $(grep -c 'retry' <<<"$out") $(grep -c 'has none' <<<"$out")" "1 1 0"
+
+  provider=openai; : >"$calls"
+  provider_configmap
+  eq "provider configmap: written with the value, server-side" "$(grep -c -- 'create configmap lab-model-provider --from-literal=MODEL_PROVIDER=openai' "$calls") $(grep -c -- 'apply --server-side' "$calls")" "1 1"
+
+  # flux_reconcile: the request is handled when the controller reports that exact token.
+  stub_get_rc=0; stub_handled=same
+  rc=0; flux_reconcile lab >/dev/null 2>&1 || rc=$?
+  eq "reconcile: handled when the controller reports the token" "$rc" 0
+  stub_handled=old
+  rc=0; out=$(flux_reconcile lab 2>&1) || rc=$?
+  eq "reconcile: a token never reported fails after the limit" "$rc $(grep -c 'did not handle' <<<"$out")" "1 1"
+  stub_handled=same; stub_get_rc=1
+  rc=0; flux_reconcile lab >/dev/null 2>&1 || rc=$?
+  eq "reconcile: a failed read is not taken as handled" "$rc" 1
+  stub_get_rc=0
+
+  # The read-back checks the cluster, not the request.
+  provider=anthropic; stub_path=./infrastructure/shadewright-lab/anthropic; stub_settings=Anthropic
+  rc=0; out=$(provider_readback 2>&1) || rc=$?
+  eq "readback: the active provider is printed" "$rc $(grep -c 'now active: anthropic (settings provider Anthropic, deployment deployment-x)' <<<"$out")" "0 1"
+  stub_settings=Foundry
+  rc=0; out=$(provider_readback 2>&1) || rc=$?
+  eq "readback: settings of another provider fail" "$rc $(grep -c 'does not run anthropic' <<<"$out")" "1 1"
+  provider=foundry; stub_path=./infrastructure/shadewright-lab/openai; stub_settings=
+  rc=0; out=$(provider_readback 2>&1) || rc=$?
+  eq "readback: a path of another variant fails" "$rc" 1
+  stub_path=./infrastructure/shadewright-lab/foundry
+  rc=0; out=$(provider_readback 2>&1) || rc=$?
+  eq "readback: an empty provider is Foundry" "$rc $(grep -c 'now active: foundry (settings provider Foundry' <<<"$out")" "0 1"
+
+  # The whole switch with the stubs of flux_install: tf, az, kubelogin, kc auth, confirm. Order and failure.
+  need() { :; }
+  confirm() { :; }
+  subscription=s
+  test_cfg_on=$cfg
+  tf() { if [[ $3 == flux ]]; then echo "$test_cfg_on"; else echo name; fi; }
+  az() { return 0; }
+  kubelogin() { return 0; }
+  # shellcheck disable=SC2329
+  kubectl() {
+    printf '%s\n' "$*" >>"$calls"
+    case " $* " in
+      *" can-i "*) echo yes ;;
+      *" get secret "*) return 0 ;;
+      *" create configmap "*) echo "kind: ConfigMap" ;;
+      *" apply "*) cat >/dev/null ;;
+      *" annotate "*) token=${*##*requestedAt=}; return 0 ;;
+      *"lastHandledReconcileAt"*) printf '%s' "$token" ;;
+      *"get kustomization"*) printf '%s' "$stub_path" ;;
+      *"get remediationsettings"*"provider"*) printf '%s' "$stub_settings" ;;
+      *"get remediationsettings"*) printf 'deployment-x' ;;
+      *" wait "*) [[ $sfail == wait ]] && return 1; return 0 ;;
+      *" rollout "*) [[ $sfail == rollout ]] && return 1; return 0 ;;
+    esac
+    return 0
+  }
+  provider=openai; stub_path=./infrastructure/shadewright-lab/openai; stub_settings=OpenAICompatible; sfail=none; : >"$calls"
+  rc=0; out=$(provider_switch 2>&1) || rc=$?
+  eq "switch: succeeds and reads the provider back" "$rc $(grep -c 'now active: openai' <<<"$out")" "0 1"
+  eq "switch: the order is ConfigMap, lab, shadewright, shadewright-config, wait, rollout" "$(grep -o 'create configmap\|annotate --overwrite kustomization/[a-z-]*\|wait --for\|rollout status' "$calls" | sed 's/annotate --overwrite kustomization\///' | tr '\n' ' ')" "create configmap lab shadewright shadewright-config wait --for rollout status "
+  for sfail in wait rollout; do
+    rc=0; out=$(provider_switch 2>&1) || rc=$?
+    eq "switch: a failed $sfail is an error and no provider is claimed active" "$rc $(grep -c 'now active' <<<"$out")" "1 0"
+  done
+  test_cfg_off='null'
+  # shellcheck disable=SC2329
+  tf() { echo "$test_cfg_off"; }
+  rc=0; out=$(provider_switch 2>&1) || rc=$?
+  eq "switch: refused when flux_enabled is false" "$rc $(grep -c 'flux_enabled is false' <<<"$out")" "1 1"
+  exit "$fails"
+) || fails=$?
+
+# flux_install writes the ConfigMap after the Flux CRDs and before the Kustomization that reads it, and checks the Secret.
+eq "flux_install: Secret check, then ConfigMap, then objects" "$(awk '/^flux_install\(\)/,/^}/' "$here/lab.sh" | grep -o 'provider_secret_check\|provider_configmap\|flux_objects' | tr '\n' ' ')" "provider_secret_check provider_configmap flux_objects "
+eq "parse_args: provider --yes approves" "$(pa provider --yes)" "0 provider 1"
 
 # confirm with --yes approves without a terminal and says so. (Without --yes it reads only /dev/tty, unchanged.)
 eq "confirm approves with --yes, no terminal" "$(auto_yes=1; confirm "Apply?" 2>/dev/null </dev/null && echo ok)" ok
