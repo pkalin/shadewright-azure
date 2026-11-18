@@ -191,6 +191,7 @@ eq "cmd_flux checks both keys before the plan" "$(awk '/^cmd_flux\(\)/,/^}/' "$h
   : >"$work/empty.txt"
   calls=$tmp/calls
   setting() { echo "${test_flux:-true}"; }
+  # shellcheck disable=SC2329 # called through kc in lab.sh
   kubectl() {
     printf '%s\n' "$*" >>"$calls"
     case " $* " in
