@@ -96,7 +96,7 @@ rm ~/path/to/anthropic.key ~/path/to/openai.key
 
 To rotate, make a new key at the vendor, run the same `az keyvault secret set` (it adds a new version, the old one stays until you disable it), then revoke the old key at the vendor. A lab run reads the current version.
 
-`LAB_MODEL_KEYS_FROM_VAULT=true make lab-up` (also `make lab-flux`) downloads the Anthropic secret into a private temporary file (`az keyvault secret download --file`), uses it as `LAB_ANTHROPIC_KEY_FILE` (see "Model API key" below) and removes the file when the script exits. The value is never read into a shell variable, never on a command line and never printed. A missing secret or a refused read (no `az login`, a network outside `admin_ip_cidrs`) stops `up` before anything is billed, and the message names the variable and the secret. Setting both `LAB_MODEL_KEYS_FROM_VAULT` and `LAB_ANTHROPIC_KEY_FILE` is an error. The OpenAI secret is stored in the vault by this setup but no script reads it yet: the fleet has no consumer for it.
+`LAB_MODEL_KEYS_FROM_VAULT=true make lab-up` (also `make lab-flux`) downloads the Anthropic secret into a private temporary file (`az keyvault secret download --file`), uses it as `LAB_ANTHROPIC_KEY_FILE` (see "Model API key" below) and removes the file when the script exits. The value is never read into a shell variable, never on a command line and never printed. A missing secret or a refused read (no `az login`, a network outside `admin_ip_cidrs`) stops `up` before anything is billed, and the message names the variable and the secret. Setting both `LAB_MODEL_KEYS_FROM_VAULT` and `LAB_ANTHROPIC_KEY_FILE` is an error. The OpenAI secret is read the same way, into `LAB_OPENAI_KEY_FILE`, and becomes the Secret `shadewright-openai` that the fleet's `openai` variant reads (see "Model provider"). With `LAB_MODEL_PROVIDER` set to `anthropic` or `openai` the matching secret must be in the vault.
 
 ## Lab session
 
@@ -135,6 +135,7 @@ make lab-down YES=1  # destroy without asking
 | `make lab-plan` | `terraform plan` of `lab`, nothing saved | No |
 | `make lab-up` | Saves a plan, prints it with a count of creates, updates and deletes (and names every delete or replace), prices the lab, asks; applies exactly the saved plan after a typed `yes`, then installs Flux when `flux_enabled` (see "Flux") | After `yes` |
 | `make lab-flux` | Only the Flux step of `lab-up`, on a cluster that is up and has `flux_enabled = true`; asks for `yes` | In the cluster only |
+| `make lab-provider` | Switches a running lab to the provider in `LAB_MODEL_PROVIDER` without a Terraform apply or a fleet commit (see "Model provider"); asks for `yes` | In the cluster only |
 | `make lab-down` | Saves a destroy plan of `lab`, prints it, asks; applies it after a typed `yes`, then runs `lab-check` | After `yes` |
 | `make lab-cost` | Price per hour, per session and per month from the Azure Retail Prices API (public, no login) | No |
 | `make lab-check` | Lists every resource in the subscription by group: lab, foundation, bootstrap, other. Fails while a lab resource group or resource remains, or when anything billed by the hour (VMs, disks, public IPs, load balancers, clusters, NAT gateways, ...) exists outside the lab | No |
@@ -185,6 +186,40 @@ change to `scripts/flux.env`, together with the fleet's `scripts/tools.env`: `sc
 (version, checksum, the four digests) whenever it finds the fleet's file, and CI fetches it from the fleet's `main`, so
 bump the fleet first. A lab applied with the AKS extension (before this change) must be destroyed first
 (`make lab-down`); applying this version on top would destroy the extension and its configuration in the plan.
+
+### Model provider
+
+The agent can run against three model providers, one after another in the same lab session: Microsoft Foundry
+(`foundry`, the default, the analyzer's workload identity, no key), the Anthropic API (`anthropic`) and the OpenAI API
+through the OpenAI-compatible provider (`openai`, ADR-0042 in the operator repository). `LAB_MODEL_PROVIDER` picks one.
+Anything else is an error before anything is billed. The fleet holds one variant per provider
+(`infrastructure/shadewright-lab/<provider>` and `.../shadewright-lab-config/<provider>`), and switching is a command,
+not a fleet commit.
+
+```bash
+LAB_MODEL_PROVIDER=anthropic LAB_MODEL_KEYS_FROM_VAULT=true make lab-up    # start the session on Anthropic
+LAB_MODEL_PROVIDER=openai make lab-provider                               # switch the running lab to OpenAI
+LAB_MODEL_PROVIDER=foundry make lab-provider                              # and back; foundry needs no key
+```
+
+How it works: the lab script writes the ConfigMap `lab-model-provider` (key `MODEL_PROVIDER`) in `flux-system`. The root
+Kustomization `lab` reads it as an optional `substituteFrom` and substitutes `${MODEL_PROVIDER:=foundry}` in the path of
+the fleet's Flux Kustomizations `shadewright` and `shadewright-config` (the fleet's README, "Model provider"). With no
+ConfigMap the default is `foundry`.
+
+- `make lab-up` and `make lab-flux` write the ConfigMap with the Flux step. `lab-up` refuses `anthropic` or `openai`
+  before the plan when the key file of that provider is not set (`LAB_ANTHROPIC_KEY_FILE` or `LAB_OPENAI_KEY_FILE`, or
+  `LAB_MODEL_KEYS_FROM_VAULT=true`).
+- `make lab-provider` needs a running lab with `flux_enabled`. After a `yes` it creates the key Secrets from the key
+  variables when they are set, refuses `anthropic` or `openai` when that provider's Secret is not in the cluster (only a
+  definite not-found counts as absent; any other failed read is an error to retry), writes the ConfigMap, asks Flux to
+  reconcile `lab`, then `shadewright` and `shadewright-config`, waits for all three to be Ready and for the analyzer to
+  roll out, and prints the provider read back from the cluster (the `RemediationSettings`, not the request). It fails
+  when the cluster shows another provider. It is safe to repeat.
+
+The `openai` variant needs a chart release that has the OpenAI-compatible provider; the fleet pins v0.5.0 today, which
+has not (the fleet's README says when it can be used). Until then `lab-provider` for `openai` stops at the HelmRelease
+not becoming Ready and says so.
 
 ### Model API key
 
