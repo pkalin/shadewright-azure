@@ -91,6 +91,24 @@ variable "analysis_retention_days" {
   default     = 180
 }
 
+variable "external_analysis_writers" {
+  type = map(object({
+    principal_id = string
+  }))
+  description = "Analyzers on clusters outside the lab, keyed by a short name. Each gets the container analyses-<name> and the analysis writer role on that container only. principal_id is the object ID of the identity that writes."
+  default     = {}
+
+  validation {
+    condition     = alltrue([for k in keys(var.external_analysis_writers) : can(regex("^[a-z0-9]([a-z0-9-]{0,48}[a-z0-9])?$", k)) && !strcontains(k, "--")])
+    error_message = "Keys must be lower case letters, digits and single hyphens, start and end with a letter or digit, at most 50 characters (container name analyses-<key> is at most 63)."
+  }
+
+  validation {
+    condition     = alltrue([for v in values(var.external_analysis_writers) : can(regex("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", v.principal_id))])
+    error_message = "principal_id must be a lower case GUID."
+  }
+}
+
 variable "monthly_budget" {
   type        = number
   description = "Monthly budget for the subscription, in its billing currency. Alerts at 50% and 80% actual, 100% forecast."

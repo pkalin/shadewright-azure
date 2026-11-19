@@ -243,6 +243,20 @@ When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-do
 half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after
 checking it is yours.
 
+## External analyzers
+
+The analysis store can also hold records of analyzers on clusters outside the lab. Add an entry to `external_analysis_writers` in `foundation/terraform.tfvars` (see the example file):
+
+```hcl
+external_analysis_writers = {
+  "other" = { principal_id = "<object ID of the identity that writes>" }
+}
+```
+
+Each key gets a private container `analyses-<key>` (output `external_analysis_containers`) and the "Shadewright analysis writer" role on that container only. The role allows creating blobs (`blobs/write`, `blobs/add/action`); it has no read, list or delete. The same retention applies, and the lab admin reads the container through the existing Storage Blob Data Contributor assignment on the account. The default `{}` changes nothing.
+
+The storage firewall still allows only the lab subnet and `admin_ip_cidrs`. An analyzer elsewhere needs a network path to the account, which this entry does not add: decide that separately (a service endpoint from its network, or a private endpoint).
+
 ## Troubleshooting
 
 ### AllocationFailed on the node pool
