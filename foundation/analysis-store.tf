@@ -17,7 +17,11 @@ resource "azurerm_storage_account" "analyses" {
     default_action             = "Deny"
     bypass                     = ["None"]
     virtual_network_subnet_ids = [azurerm_subnet.aks.id]
-    ip_rules                   = [for c in var.admin_ip_cidrs : trimsuffix(c, "/32")]
+    # Admin addresses, then the egress addresses of external writers (variables.tf); storage rejects /32.
+    ip_rules = distinct(concat(
+      [for c in var.admin_ip_cidrs : trimsuffix(c, "/32")],
+      flatten([for k in sort(keys(var.external_analysis_writers)) : var.external_analysis_writers[k].egress_ips]),
+    ))
   }
 
   blob_properties {

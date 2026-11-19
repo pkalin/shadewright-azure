@@ -255,7 +255,26 @@ external_analysis_writers = {
 
 Each key gets a private container `analyses-<key>` (output `external_analysis_containers`) and the "Shadewright analysis writer" role on that container only. The role allows creating blobs (`blobs/write`, `blobs/add/action`); it has no read, list or delete. The same retention applies, and the lab admin reads the container through the existing Storage Blob Data Contributor assignment on the account. The default `{}` changes nothing.
 
-The storage firewall still allows only the lab subnet and `admin_ip_cidrs`. An analyzer elsewhere needs a network path to the account, which this entry does not add: decide that separately (a service endpoint from its network, or a private endpoint).
+The storage firewall (default action Deny, no bypass) admits the lab subnet and `admin_ip_cidrs`. An analyzer elsewhere also needs its public outbound IPv4 addresses in `egress_ips`; each is added to the account's IP rules (duplicates are merged). Nothing else is opened: default action, bypass and public network access stay as they are.
+
+```hcl
+external_analysis_writers = {
+  "other" = {
+    principal_id = "<object ID of the identity that writes>"
+    egress_ips   = ["<public outbound IPv4 address of that cluster>"]
+  }
+}
+```
+
+Each address must be a single public IPv4 address without a prefix: Azure Storage takes `/31` and `/32` ranges only as bare addresses, and this variable accepts no ranges. Private (RFC 1918), shared, loopback, link-local, multicast and other reserved addresses are refused at plan time.
+
+Limits, from Microsoft Learn "Guidelines and limitations for the Azure Storage firewall":
+
+- An IP rule works only for a cluster in a different Azure region than the storage account. It has no effect on requests from the same region, and not from its paired region when the cluster's subnet has a storage service endpoint. A cluster in the same region needs a virtual network rule instead, which this variable does not provide.
+- An outbound address managed by the cluster's load balancer is replaced when the cluster is recreated. Update `egress_ips` then, or the writer is refused.
+- A storage account takes at most 400 IP rules.
+
+`make test` runs plan-only tests of these entries on a mocked provider (`foundation/tests/`).
 
 ## Troubleshooting
 
