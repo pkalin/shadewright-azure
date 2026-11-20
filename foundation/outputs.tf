@@ -63,6 +63,11 @@ output "analysis_store" {
   }
 }
 
+output "external_analysis_containers" {
+  description = "Container per external analyzer key."
+  value       = { for k, c in azurerm_storage_container.external_analyses : k => c.name }
+}
+
 output "vnet" {
   description = "Lab VNet, for the remote side of a peering."
   value = {

@@ -41,5 +41,7 @@ check: ## terraform fmt and validate for every root, as CI runs them (no backend
 	  terraform -chdir=$$r validate || exit 1; \
 	done
 
-test: ## Offline tests of the lab script (no Terraform, no Azure)
+test: ## Offline tests: the lab script and foundation's plans on a mocked provider (no Azure, no credentials)
 	scripts/lab_test.sh
+	terraform -chdir=foundation init -backend=false -input=false -lockfile=readonly >/dev/null
+	terraform -chdir=foundation test
