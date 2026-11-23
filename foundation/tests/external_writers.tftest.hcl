@@ -13,6 +13,15 @@ mock_provider "azurerm" {
 }
 mock_provider "random" {}
 
+# A known lab subnet ID, so the account's virtual network rules are known at plan time.
+override_resource {
+  target          = azurerm_subnet.aks
+  override_during = plan
+  values = {
+    id = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-lab/providers/Microsoft.Network/virtualNetworks/vnet-lab/subnets/aks"
+  }
+}
+
 variables {
   subscription_id       = "00000000-0000-0000-0000-000000000000"
   prefix                = "shw"
@@ -120,5 +129,53 @@ run "slash_32_refused" {
     }
   }
 
+  expect_failures = [var.external_analysis_writers]
+}
+
+run "subnet_rule_added_sorted" {
+  command = plan
+
+  variables {
+    external_analysis_writers = {
+      "b" = {
+        principal_id = "22222222-2222-2222-2222-222222222222"
+        subnet_ids   = ["/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-x/providers/Microsoft.Network/virtualNetworks/v/subnets/z"]
+      }
+      "a" = {
+        principal_id = "11111111-1111-1111-1111-111111111111"
+        subnet_ids = [
+          "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-x/providers/Microsoft.Network/virtualNetworks/v/subnets/z",
+          "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-x/providers/Microsoft.Network/virtualNetworks/v/subnets/y",
+        ]
+      }
+    }
+  }
+
+  assert {
+    condition     = length(azurerm_storage_account.analyses.network_rules[0].virtual_network_subnet_ids) == 3
+    error_message = "the lab subnet and two distinct writer subnets must be rules"
+  }
+}
+
+run "default_subnet_rules_lab_only" {
+  command = plan
+
+  assert {
+    condition     = length(azurerm_storage_account.analyses.network_rules[0].virtual_network_subnet_ids) == 1
+    error_message = "without subnet_ids only the lab subnet is a rule"
+  }
+}
+
+run "bad_subnet_id_refused" {
+  command = plan
+
+  variables {
+    external_analysis_writers = {
+      "other" = {
+        principal_id = "11111111-1111-1111-1111-111111111111"
+        subnet_ids   = ["subnets/nodes"]
+      }
+    }
+  }
   expect_failures = [var.external_analysis_writers]
 }

@@ -95,10 +95,12 @@ variable "external_analysis_writers" {
   type = map(object({
     principal_id = string
     egress_ips   = optional(list(string), [])
+    subnet_ids   = optional(list(string), [])
   }))
   description = <<-EOT
     Analyzers on clusters outside the lab, keyed by a short name. Each gets the container analyses-<name> and the analysis writer role on that container only. principal_id is the object ID of the identity that writes.
-    egress_ips are the public outbound IPv4 addresses the cluster reaches the account from; each is added to the account's IP rules (single addresses, no CIDR, no private or reserved ranges). Limits: an IP rule works only for a cluster in a different Azure region than the storage account, and not from its paired region when the cluster's subnet has a storage service endpoint (a same-region cluster needs a virtual network rule, which this variable does not provide). An outbound address managed by the cluster's load balancer changes when the cluster is recreated: update the entry then.
+    egress_ips are the public outbound IPv4 addresses the cluster reaches the account from; each is added to the account's IP rules (single addresses, no CIDR, no private or reserved ranges). Limits: an IP rule works only for a cluster in a different Azure region than the storage account, and not from its paired region when the cluster's subnet has a storage service endpoint. An outbound address managed by the cluster's load balancer changes when the cluster is recreated: update the entry then.
+    subnet_ids are resource IDs of subnets (/subscriptions/<id>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<name>), each added as a virtual network rule next to the lab's own subnet. Needed when the writer's node subnet has a Storage service endpoint (Microsoft.Storage or Microsoft.Storage.Global): its traffic then no longer comes from the public address and an IP rule cannot match (403 AuthorizationFailure). The subnet must have that service endpoint. For a subnet in another subscription, the identity that applies this root needs Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action on it. Default empty: no rule is added.
   EOT
   default     = {}
 
@@ -139,6 +141,16 @@ variable "external_analysis_writers" {
       ]
     ]))
     error_message = "egress_ips must be public addresses: private (RFC 1918), shared, loopback, link-local, multicast and other reserved ranges are refused."
+  }
+
+  # ARM ID of a subnet; Azure treats the segment names case-insensitively.
+  validation {
+    condition = alltrue(flatten([
+      for v in values(var.external_analysis_writers) : [
+        for id in v.subnet_ids : can(regex("^(?i)/subscriptions/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/resourceGroups/[^/]+/providers/Microsoft\\.Network/virtualNetworks/[^/]+/subnets/[^/]+$", id))
+      ]
+    ]))
+    error_message = "subnet_ids must be subnet resource IDs: /subscriptions/<id>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<name>."
   }
 }
 
