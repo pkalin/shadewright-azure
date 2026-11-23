@@ -14,10 +14,20 @@ resource "azurerm_storage_account" "analyses" {
   default_to_oauth_authentication = true
 
   network_rules {
-    default_action             = "Deny"
-    bypass                     = ["None"]
-    virtual_network_subnet_ids = [azurerm_subnet.aks.id]
-    ip_rules                   = [for c in var.admin_ip_cidrs : trimsuffix(c, "/32")]
+    default_action = "Deny"
+    bypass         = ["None"]
+    # The lab's subnet, then the distinct, sorted subnets of external writers (variables.tf). Sorting only the
+    # writers' part keeps the list known at plan time while the lab subnet is not created yet; the provider
+    # treats the list as a set.
+    virtual_network_subnet_ids = concat(
+      [azurerm_subnet.aks.id],
+      sort(distinct(flatten([for k in sort(keys(var.external_analysis_writers)) : var.external_analysis_writers[k].subnet_ids]))),
+    )
+    # Admin addresses, then the egress addresses of external writers (variables.tf); storage rejects /32.
+    ip_rules = distinct(concat(
+      [for c in var.admin_ip_cidrs : trimsuffix(c, "/32")],
+      flatten([for k in sort(keys(var.external_analysis_writers)) : var.external_analysis_writers[k].egress_ips]),
+    ))
   }
 
   blob_properties {
@@ -36,6 +46,14 @@ resource "azurerm_storage_container" "analyses" {
   storage_account_id = azurerm_storage_account.analyses.id
 }
 
+# One container per analyzer that runs outside the lab, written by an identity that lives elsewhere.
+resource "azurerm_storage_container" "external_analyses" {
+  for_each = var.external_analysis_writers
+
+  name               = "analyses-${each.key}"
+  storage_account_id = azurerm_storage_account.analyses.id
+}
+
 resource "azurerm_storage_management_policy" "analyses" {
   storage_account_id = azurerm_storage_account.analyses.id
 
@@ -44,8 +62,11 @@ resource "azurerm_storage_management_policy" "analyses" {
     enabled = true
 
     filters {
-      blob_types   = ["blockBlob"]
-      prefix_match = ["${azurerm_storage_container.analyses.name}/"]
+      blob_types = ["blockBlob"]
+      prefix_match = concat(
+        ["${azurerm_storage_container.analyses.name}/"],
+        [for c in azurerm_storage_container.external_analyses : "${c.name}/"],
+      )
     }
 
     actions {
@@ -80,7 +101,17 @@ resource "azurerm_role_assignment" "analysis_writer" {
   principal_id       = azurerm_user_assigned_identity.analyzer.principal_id
 }
 
+# Same role as the lab analyzer, scoped to the writer's own container: it can't read or list any container.
+resource "azurerm_role_assignment" "external_analysis_writer" {
+  for_each = var.external_analysis_writers
+
+  scope              = azurerm_storage_container.external_analyses[each.key].id
+  role_definition_id = azurerm_role_definition.analysis_writer.role_definition_resource_id
+  principal_id       = each.value.principal_id
+}
+
 # The admin reads records for debugging and to build evaluation fixtures.
+# The role is scoped to the account, so it also covers the external containers.
 resource "azurerm_role_assignment" "analysis_admin" {
   scope                = azurerm_storage_account.analyses.id
   role_definition_name = "Storage Blob Data Contributor"

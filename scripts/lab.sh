@@ -7,6 +7,8 @@
 #                          apply, the Flux step alone, after its own "yes")
 #   scripts/lab.sh flux    only that Flux step, for a cluster that is up, after a "yes" (idempotent: run it again
 #                          after a failure)
+#   scripts/lab.sh provider  switch the model provider of a running lab to LAB_MODEL_PROVIDER (README, "Model provider"),
+#                          after a "yes": no Terraform apply, only the cluster
 #   scripts/lab.sh down    plan the destroy of `lab` (never foundation or bootstrap), ask for "yes", apply it,
 #                          then run `check`
 #   scripts/lab.sh cost    the lab's price per hour from the Azure Retail Prices API (public, no login)
@@ -16,8 +18,12 @@
 # ../backend.hcl. Prints names and types only, never subscription IDs or resource IDs. Up, flux and down need a
 # terminal and a typed "yes", unless the command line says `--yes` (`make lab-up YES=1`): then the plan and the
 # price are still printed and the apply goes ahead without asking, except that `up --yes` still asks for a plan
-# that deletes or replaces anything. Setting LAB_ANTHROPIC_KEY_FILE to a file that holds a model API key makes the
-# Flux step create the Secret shadewright-anthropic in shadewright-system from it (README, "Model API key"). Standard input never approves (`yes | make lab-up` does not work).
+# that deletes or replaces anything. Setting LAB_ANTHROPIC_KEY_FILE or LAB_OPENAI_KEY_FILE to a file that holds a
+# model API key makes the Flux step create the Secret shadewright-anthropic or shadewright-openai in shadewright-system
+# from it (README, "Model API key"). LAB_MODEL_KEYS_FROM_VAULT=true does the same with the keys kept in the
+# foundation's Key Vault (README, "Model API keys"); setting it together with a file variable is an error.
+# LAB_MODEL_PROVIDER (foundry by default, anthropic or openai; anything else is an error before anything is billed) is the
+# model provider the fleet's agent runs against: up and flux write it to the cluster, provider switches a running lab. Standard input never approves (`yes | make lab-up` does not work).
 set -euo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -38,7 +44,7 @@ auto_yes=0
 die() { printf 'lab: %s\n' "$*" >&2; exit 1; }
 info() { printf '\n==> %s\n' "$*"; }
 
-usage() { sed -n '2,19s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,26s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; }
 
 need() { for c in "$@"; do command -v "$c" >/dev/null || die "$c is not installed"; done; }
 
@@ -121,7 +127,7 @@ plan_deletes() {
   tf show -json "$1" | jq '[.resource_changes[]? | select(.change.actions | index("delete"))] | length'
 }
 
-# The command and its options: `<command> [--yes]`. Sets $command and auto_yes; --yes only for up, flux and down.
+# The command and its options: `<command> [--yes]`. Sets $command and auto_yes; --yes only for up, flux, provider and down.
 parse_args() {
   command=${1:-help}
   [[ $# -gt 0 ]] && shift
@@ -134,7 +140,7 @@ parse_args() {
     shift
   done
   case $command in
-    up | flux | down) ;;
+    up | flux | down | provider) ;;
     *) [[ $auto_yes == 0 ]] || return 2 ;;
   esac
 }
@@ -336,7 +342,8 @@ flux_fetch() {
 }
 
 # flux_objects <the flux output as JSON>: the GitRepository "fleet" (60 s) and the root Kustomization "lab" that
-# applies ./clusters/lab with the substitutions from Terraform, as a JSON List for kubectl. Values travel as jq data,
+# applies ./clusters/lab with the substitutions from Terraform and, optionally, the ConfigMap lab-model-provider (the
+# model provider, see below), as a JSON List for kubectl. Values travel as jq data,
 # never through shell or YAML quoting.
 flux_objects() {
   jq -e '
@@ -347,7 +354,9 @@ flux_objects() {
       {apiVersion: "kustomize.toolkit.fluxcd.io/v1", kind: "Kustomization",
        metadata: {name: "lab", namespace: "flux-system"},
        spec: {interval: "2m", retryInterval: "1m", timeout: "5m", sourceRef: {kind: "GitRepository", name: "fleet"},
-              path: "./clusters/lab", prune: true, wait: false, postBuild: {substitute: .substitute}}}]}
+              path: "./clusters/lab", prune: true, wait: false,
+              postBuild: {substitute: .substitute,
+                          substituteFrom: [{kind: "ConfigMap", name: "lab-model-provider", optional: true}]}}}]}
   ' <<<"$1"
 }
 
@@ -374,42 +383,259 @@ flux_preflight() {
   flux_fetch "$tmp/flux.yaml"
 }
 
-# The optional model API key (ADR-0037, decision 7). LAB_ANTHROPIC_KEY_FILE names a file that holds the key; unset
-# means nothing happens and nothing is printed. The key is never read into a shell variable, never goes through
-# Terraform and is never printed: kubectl reads the file itself. A bad file stops `up` and `flux` before anything is
-# billed; the messages name the variable, never the path or the content.
-anthropic_key_check() {
-  [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || return 0
-  [[ -f $LAB_ANTHROPIC_KEY_FILE && -r $LAB_ANTHROPIC_KEY_FILE && -s $LAB_ANTHROPIC_KEY_FILE ]] ||
-    die "LAB_ANTHROPIC_KEY_FILE is set but is not a readable, non-empty file"
+# The optional model API keys (ADR-0037 decision 7 for Anthropic, ADR-0042 for OpenAI). LAB_ANTHROPIC_KEY_FILE and
+# LAB_OPENAI_KEY_FILE each name a file that holds one key; unset means nothing happens and nothing is printed. A key is
+# never read into a shell variable, never goes through Terraform and is never printed: kubectl reads the file itself.
+# A bad file stops `up` and `flux` before anything is billed; the messages name the variable, never the path or the
+# content. Both keys share the code below.
+# model_key_check <file variable>
+model_key_check() {
+  local var=$1
+  [[ -n ${!var:-} ]] || return 0
+  [[ -f ${!var} && -r ${!var} && -s ${!var} ]] ||
+    die "$var is set but is not a readable, non-empty file"
   [[ $(setting lab flux_enabled) == true ]] ||
-    die "LAB_ANTHROPIC_KEY_FILE is set but flux_enabled is false: the lab has no fleet to use the key"
+    die "$var is set but flux_enabled is false: the lab has no fleet to use the key"
+}
+anthropic_key_check() { model_key_check LAB_ANTHROPIC_KEY_FILE; }
+openai_key_check() { model_key_check LAB_OPENAI_KEY_FILE; }
+
+foundation_tf() { terraform -chdir="$repo/foundation" "$@"; }
+
+# The optional LAB_MODEL_KEYS_FROM_VAULT=true (README, "Model API keys"): each key is downloaded from the foundation's
+# Key Vault into a private file under $tmp (umask 077, removed by the exit trap) and its file variable is pointed at
+# it, so the path below is the same as for a file the operator made. The value is never read into a shell variable,
+# never on a command line, never printed. Runs before anything is billed: a refused read stops `up` and `flux`. A
+# secret that is absent from the vault (Azure answers SecretNotFound) is skipped with one line naming it; when neither
+# is there, that is an error. The messages name the variable and the secret name, never the vault, the path or the
+# content.
+# vault_key_download <file variable> <secret name> <vault> <dir>: returns 0 when downloaded, 1 when the secret is absent.
+vault_key_download() {
+  local var=$1 secret=$2 vault=$3 dir=$4 err
+  err="$dir/$secret.err"
+  # --file must not exist yet. The value goes from Azure to the file; stdout is dropped and stderr goes to a private
+  # file that is only searched, never printed, so a failure cannot leak anything.
+  if az keyvault secret download --vault-name "$vault" --name "$secret" --file "$dir/$secret" \
+    --encoding utf-8 --subscription "$subscription" >/dev/null 2>"$err"; then
+    printf -v "$var" '%s' "$dir/$secret"
+    export "${var?}"
+    return 0
+  fi
+  # Only a definite "absent" skips; any other failure (no login, firewall, no role) is an error to retry.
+  ! grep -q SecretNotFound "$err" ||
+    return 1
+  die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the secret $secret from the foundation's Key Vault: set it once (README, Model API keys), check az login and that your IP is in admin_ip_cidrs, then retry"
 }
 
-# anthropic_key_secret: creates or updates Secret shadewright-anthropic (key api-key) in shadewright-system. The
-# namespace is created here, plainly, before Flux applies the fleet: the fleet's own Namespace object (Pod Security
+model_keys_from_vault() {
+  case ${LAB_MODEL_KEYS_FROM_VAULT:-} in
+    "" | false) return 0 ;;
+    true) ;;
+    *) die "LAB_MODEL_KEYS_FROM_VAULT must be true or unset" ;;
+  esac
+  [[ -z ${LAB_ANTHROPIC_KEY_FILE:-} ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT and LAB_ANTHROPIC_KEY_FILE are both set: use one"
+  [[ -z ${LAB_OPENAI_KEY_FILE:-} ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT and LAB_OPENAI_KEY_FILE are both set: use one"
+  [[ $(setting lab flux_enabled) == true ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT is set but flux_enabled is false: the lab has no fleet to use the key"
+  need az jq terraform
+  local out vault dir found=0 provider var secret
+  foundation_tf init -input=false -backend-config=../backend.hcl >/dev/null ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: cannot initialise the foundation root to find the vault: retry"
+  out=$(foundation_tf output -json key_vault) ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: cannot read the foundation's key_vault output: is the foundation applied? retry"
+  vault=$(jq -r '.name // empty' <<<"$out")
+  [[ -n $vault ]] ||
+    die "LAB_MODEL_KEYS_FROM_VAULT: the foundation's key_vault output has no vault name: apply the foundation first"
+  dir=$(umask 077; mktemp -d "$tmp/vault-key.XXXXXX") || die "cannot create a private directory for the key"
+  for provider in anthropic openai; do
+    case $provider in
+      anthropic) var=LAB_ANTHROPIC_KEY_FILE ;;
+      openai) var=LAB_OPENAI_KEY_FILE ;;
+    esac
+    secret=$(jq -r --arg p "$provider" '.model_key_secrets[$p] // empty' <<<"$out")
+    [[ -n $secret ]] ||
+      die "LAB_MODEL_KEYS_FROM_VAULT: the foundation's key_vault output has no name for the $provider key secret: apply the foundation first"
+    if vault_key_download "$var" "$secret" "$vault" "$dir"; then
+      found=1
+    else
+      info "LAB_MODEL_KEYS_FROM_VAULT: the secret $secret is not in the Key Vault: skipped"
+    fi
+  done
+  ((found == 1)) || die "LAB_MODEL_KEYS_FROM_VAULT: neither model key secret is in the Key Vault: set one (README, Model API keys)"
+}
+
+# model_key_secret <file variable> <Secret name>: creates or updates the Secret (key api-key) in shadewright-system.
+# The namespace is created here, plainly, before Flux applies the fleet: the fleet's own Namespace object (Pod Security
 # labels, prune disabled) is then applied over it by Flux, and the Secret is there when the agent starts. Called as
 # `anthropic_key_secret || ...`: every step ends in `|| return 1`.
-anthropic_key_secret() {
-  [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || return 0
-  anthropic_key_check || return 1
-  info "Model API key: Secret shadewright-anthropic in shadewright-system"
+model_key_secret() {
+  local var=$1 name=$2
+  [[ -n ${!var:-} ]] || return 0
+  model_key_check "$var" || return 1
+  info "Model API key: Secret $name in shadewright-system"
   kc create namespace shadewright-system --dry-run=client -o yaml |
     kc apply --server-side --field-manager=shadewright-lab -f - >/dev/null ||
     { flux_fail "creating the namespace shadewright-system failed"; return 1; }
-  kc -n shadewright-system create secret generic shadewright-anthropic \
-    --from-file=api-key="$LAB_ANTHROPIC_KEY_FILE" --dry-run=client -o yaml |
+  kc -n shadewright-system create secret generic "$name" \
+    --from-file=api-key="${!var}" --dry-run=client -o yaml |
     kc apply --server-side --field-manager=shadewright-lab -f - >/dev/null ||
-    { flux_fail "creating the Secret shadewright-anthropic failed"; return 1; }
+    { flux_fail "creating the Secret $name failed"; return 1; }
 }
+anthropic_key_secret() { model_key_secret LAB_ANTHROPIC_KEY_FILE shadewright-anthropic; }
+openai_key_secret() { model_key_secret LAB_OPENAI_KEY_FILE shadewright-openai; }
 
 # flux_fail <message>: the one way out of flux_install on an error.
 flux_fail() { printf 'lab: %s\n' "$1" >&2; return 1; }
 
+# cluster_credentials: a private kubeconfig for the lab cluster (kc uses it) and a wait until the API server accepts it.
+# Called as `cluster_credentials || return 1`.
+cluster_credentials() {
+  local rg cluster i=0
+  info "Kubeconfig (a private file, removed on exit; your own kubeconfig is not touched)"
+  rg=$(tf output -raw resource_group_name) || { flux_fail "cannot read resource_group_name"; return 1; }
+  cluster=$(tf output -raw cluster_name) || { flux_fail "cannot read cluster_name"; return 1; }
+  az aks get-credentials --subscription "$subscription" -g "$rg" -n "$cluster" --file "$tmp/kubeconfig" \
+    --overwrite-existing >/dev/null || { flux_fail "az aks get-credentials failed"; return 1; }
+  kubelogin convert-kubeconfig -l azurecli --kubeconfig "$tmp/kubeconfig" || { flux_fail "kubelogin failed"; return 1; }
+  # A new cluster, and a role assignment that has just been made, can take a minute to answer.
+  until [[ $(kc auth can-i create clusterroles 2>/dev/null) == yes ]]; do
+    i=$((i + 1))
+    ((i <= 36)) || { flux_fail "the API server did not accept your credentials within 3 minutes"; return 1; }
+    sleep "${FLUX_POLL:-5}"
+  done
+}
+
+# --- The model provider (README, "Model provider") ---------------------------------------------------------------------
+# The fleet holds one variant per provider (foundry, anthropic, openai) and the Flux Kustomizations shadewright and
+# shadewright-config end their path in ${MODEL_PROVIDER:=foundry}, which the root Kustomization lab substitutes from the
+# optional ConfigMap lab-model-provider in flux-system. This script writes that ConfigMap; nothing is committed to the
+# fleet to switch. LAB_MODEL_PROVIDER names the provider, foundry when unset.
+
+# provider_check: sets $provider from LAB_MODEL_PROVIDER, or dies before anything is billed. The value is not echoed.
+provider_check() {
+  provider=${LAB_MODEL_PROVIDER:-foundry}
+  case $provider in
+    foundry | anthropic | openai) ;;
+    *) die "LAB_MODEL_PROVIDER must be foundry, anthropic or openai" ;;
+  esac
+}
+
+# provider_secret_name: the name of the Secret the provider reads its key from, empty for foundry (no key).
+provider_secret_name() {
+  case $provider in
+    anthropic) printf 'shadewright-anthropic' ;;
+    openai) printf 'shadewright-openai' ;;
+  esac
+}
+
+# provider_needs_key: for `up`, before anything is billed: a fresh cluster has no Secret, so the provider's key file
+# (or the vault, which sets the same variable) must be given. Not for `flux` and `provider`, which may find the Secret
+# in the cluster already; provider_secret_check looks there.
+provider_needs_key() {
+  case $provider in
+    anthropic) [[ -n ${LAB_ANTHROPIC_KEY_FILE:-} ]] || die "LAB_MODEL_PROVIDER=anthropic needs LAB_ANTHROPIC_KEY_FILE or LAB_MODEL_KEYS_FROM_VAULT=true: the lab has no Secret for the Anthropic key yet" ;;
+    openai) [[ -n ${LAB_OPENAI_KEY_FILE:-} ]] || die "LAB_MODEL_PROVIDER=openai needs LAB_OPENAI_KEY_FILE or LAB_MODEL_KEYS_FROM_VAULT=true: the lab has no Secret for the OpenAI key yet" ;;
+  esac
+}
+
+# provider_secret_check: the provider's Secret must be in the cluster (created just before from the key file, or there
+# from an earlier run). Only a definite NotFound says it is absent; any other failed read is an error to retry.
+# Called as `provider_secret_check || return 1`.
+provider_secret_check() {
+  local name err="$tmp/provider-secret.err"
+  name=$(provider_secret_name)
+  [[ -n $name ]] || return 0
+  kc -n shadewright-system get secret "$name" -o name >/dev/null 2>"$err" && return 0
+  if grep -q NotFound "$err"; then
+    flux_fail "LAB_MODEL_PROVIDER=$provider needs the Secret $name in shadewright-system and the cluster has none: set the key file variable of that provider (or LAB_MODEL_KEYS_FROM_VAULT=true) and run again"
+  else
+    flux_fail "cannot read the Secret $name in shadewright-system: retry"
+  fi
+  return 1
+}
+
+# provider_configmap: the ConfigMap the root Kustomization reads (optional there, so a lab without it runs foundry).
+provider_configmap() {
+  info "Model provider: $provider (ConfigMap lab-model-provider in flux-system)"
+  kc -n flux-system create configmap lab-model-provider --from-literal=MODEL_PROVIDER="$provider" --dry-run=client -o yaml |
+    kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f - >/dev/null ||
+    { flux_fail "writing the ConfigMap lab-model-provider failed"; return 1; }
+}
+
+# flux_reconcile <kustomization>: asks Flux to reconcile it now (the annotation `flux reconcile` sets) and waits until
+# the controller reports that exact request as handled (status.lastHandledReconcileAt). The request is a unique token,
+# compared for equality only: no clocks are compared. A failed read is retried until the limit, never taken as an answer.
+flux_reconcile() {
+  local name=$1 token got i=0
+  token="lab-$$-${RANDOM}-$(date -u +%s)"
+  kc -n flux-system annotate --overwrite "kustomization/$name" "reconcile.fluxcd.io/requestedAt=$token" >/dev/null ||
+    { flux_fail "cannot ask Flux to reconcile kustomization/$name"; return 1; }
+  while :; do
+    got=$(kc -n flux-system get "kustomization/$name" -o jsonpath='{.status.lastHandledReconcileAt}' 2>/dev/null) || got=
+    [[ $got == "$token" ]] && return 0
+    i=$((i + 1))
+    ((i <= ${PROVIDER_POLL_TRIES:-60})) ||
+      { flux_fail "Flux did not handle the reconcile request of kustomization/$name in time: kubectl -n flux-system describe kustomization $name"; return 1; }
+    sleep "${FLUX_POLL:-5}"
+  done
+}
+
+# provider_readback: what the cluster says is active, and the check that it is the requested provider. The settings
+# hold the provider (empty is Foundry, the CRD default); the Flux path of both Kustomizations ends in the variant.
+provider_readback() {
+  local want path_agent path_cfg got model
+  case $provider in foundry) want=Foundry ;; anthropic) want=Anthropic ;; openai) want=OpenAICompatible ;; esac
+  path_agent=$(kc -n flux-system get kustomization shadewright -o jsonpath='{.spec.path}') ||
+    { flux_fail "cannot read kustomization/shadewright: retry"; return 1; }
+  path_cfg=$(kc -n flux-system get kustomization shadewright-config -o jsonpath='{.spec.path}') ||
+    { flux_fail "cannot read kustomization/shadewright-config: retry"; return 1; }
+  got=$(kc get remediationsettings default -o jsonpath='{.spec.analysis.models.triage.provider}') ||
+    { flux_fail "cannot read the RemediationSettings: retry"; return 1; }
+  model=$(kc get remediationsettings default -o jsonpath='{.spec.analysis.models.triage.deployment}') ||
+    { flux_fail "cannot read the RemediationSettings: retry"; return 1; }
+  [[ -n $got ]] || got=Foundry
+  if [[ $path_agent != */"$provider" || $path_cfg != */"$provider" || $got != "$want" ]]; then
+    flux_fail "the cluster does not run $provider: Flux paths ${path_agent##*/} and ${path_cfg##*/}, settings provider $got"
+    return 1
+  fi
+  printf '\nModel provider now active: %s (settings provider %s, deployment %s)\n' "$provider" "$got" "$model"
+}
+
+# provider_switch [ask]: switches a running lab: its Secret, the ConfigMap, a reconcile of lab and then of the two
+# children, the analyzer's rollout, and the read-back. Called as `provider_switch || ...`: every step ends in `|| return 1`.
+provider_switch() {
+  local cfg
+  cfg=$(tf output -json flux) || { flux_fail "cannot read the flux output of the lab: is the lab applied?"; return 1; }
+  if [[ $(jq -r 'type' <<<"$cfg") != object ]]; then
+    flux_fail "flux_enabled is false: the lab has no fleet to switch"
+    return 1
+  fi
+  need kubectl kubelogin az
+  [[ -z ${1:-} ]] || confirm "Switch the model provider of the running lab to $provider?"
+  cluster_credentials || return 1
+  anthropic_key_secret || return 1
+  openai_key_secret || return 1
+  provider_secret_check || return 1
+  provider_configmap || return 1
+  info "Flux: reconcile lab, shadewright, shadewright-config"
+  flux_reconcile lab || return 1
+  flux_reconcile shadewright || return 1
+  flux_reconcile shadewright-config || return 1
+  kc -n flux-system wait --for=condition=Ready kustomization/lab kustomization/shadewright kustomization/shadewright-config \
+    --timeout="${PROVIDER_READY_TIMEOUT:-600s}" >/dev/null ||
+    { flux_fail "a Kustomization is not Ready after the switch: kubectl -n flux-system get kustomization, and describe helmrelease shadewright (the chart may not support $provider)"; return 1; }
+  info "The analyzer rolls out"
+  kc -n shadewright-system rollout status deployment/shadewright-analyzer --timeout="${PROVIDER_ROLLOUT_TIMEOUT:-300s}" >/dev/null ||
+    { flux_fail "the analyzer did not roll out: kubectl -n shadewright-system get pods"; return 1; }
+  provider_readback || return 1
+}
+
 # flux_install [ask]: with an argument, asks for a typed yes first (a step that is not part of an applied plan).
 # Called as `flux_install || ...`, which switches set -e off inside it: every step ends in `|| return 1`.
 flux_install() {
-  local cfg manifest="$tmp/flux.yaml" i=0 rg cluster
+  local cfg manifest="$tmp/flux.yaml"
   cfg=$(tf output -json flux) || { flux_fail "cannot read the flux output of the lab: is the lab applied?"; return 1; }
   if [[ $(jq -r 'type' <<<"$cfg") != object ]]; then
     printf '\nflux_enabled is false: Flux is not installed.\n'
@@ -423,20 +649,11 @@ flux_install() {
     flux_fetch "$manifest" || return 1
   fi
 
-  info "Flux: kubeconfig (a private file, removed on exit; your own kubeconfig is not touched)"
-  rg=$(tf output -raw resource_group_name) || { flux_fail "cannot read resource_group_name"; return 1; }
-  cluster=$(tf output -raw cluster_name) || { flux_fail "cannot read cluster_name"; return 1; }
-  az aks get-credentials --subscription "$subscription" -g "$rg" -n "$cluster" --file "$tmp/kubeconfig" \
-    --overwrite-existing >/dev/null || { flux_fail "az aks get-credentials failed"; return 1; }
-  kubelogin convert-kubeconfig -l azurecli --kubeconfig "$tmp/kubeconfig" || { flux_fail "kubelogin failed"; return 1; }
-  # A new cluster, and a role assignment that has just been made, can take a minute to answer.
-  until [[ $(kc auth can-i create clusterroles 2>/dev/null) == yes ]]; do
-    i=$((i + 1))
-    ((i <= 36)) || { flux_fail "the API server did not accept your credentials within 3 minutes"; return 1; }
-    sleep "${FLUX_POLL:-5}"
-  done
+  cluster_credentials || return 1
 
   anthropic_key_secret || return 1
+  openai_key_secret || return 1
+  provider_secret_check || return 1
 
   info "Flux: install"
   kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f "$manifest" >/dev/null ||
@@ -445,6 +662,8 @@ flux_install() {
     { flux_fail "the Flux CRDs are not Established"; return 1; }
   kc -n flux-system wait --for=condition=Available deployment --all --timeout=300s >/dev/null ||
     { flux_fail "the Flux controllers are not Available: kubectl -n flux-system get pods"; return 1; }
+
+  provider_configmap || return 1
 
   info "Flux: GitRepository fleet and Kustomization lab"
   flux_objects "$cfg" | kc apply --server-side --force-conflicts --field-manager=shadewright-lab -f - >/dev/null ||
@@ -456,11 +675,25 @@ flux_install() {
 
 cmd_flux() {
   need terraform jq
+  provider_check
   lab_config
+  model_keys_from_vault
   anthropic_key_check
+  openai_key_check
   tf_init
   flux_preflight
   flux_install ask || die "the Flux step failed: run make lab-flux again"
+}
+
+cmd_provider() {
+  need terraform jq
+  provider_check
+  lab_config
+  model_keys_from_vault
+  anthropic_key_check
+  openai_key_check
+  tf_init
+  provider_switch ask || die "the switch failed: run make lab-provider again (it is safe to repeat)"
 }
 
 # The text after a failed apply. A cluster that Azure created but could not finish (for example AllocationFailed) is
@@ -471,8 +704,12 @@ apply_failed_hint() {
 
 cmd_up() {
   need terraform jq curl az
+  provider_check
   lab_config
+  model_keys_from_vault
   anthropic_key_check
+  openai_key_check
+  provider_needs_key
   tf_init
   flux_preflight
   local plan="lab-up.tfplan" rc=0
@@ -545,6 +782,7 @@ case $command in
   cost) cmd_cost ;;
   check) cmd_check ;;
   flux) cmd_flux ;;
+  provider) cmd_provider ;;
   help | -h | --help) usage ;;
   *) usage >&2; exit 2 ;;
 esac

@@ -11,7 +11,7 @@ Terraform for a reference [Shadewright](https://shadewright.io) lab in Azure: a 
 | Root | What | Lifetime |
 | --- | --- | --- |
 | `bootstrap/` | Storage account for Terraform state | Permanent |
-| `foundation/` | VNet, Key Vault (GitHub App key), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
+| `foundation/` | VNet, Key Vault (GitHub App key, model API key secrets), analyzer and executor identities, AI Services account and model deployments, analysis records storage, budget alert | Permanent, near-zero fixed cost |
 | `lab/` | AKS, federated credentials for both identities; the values Flux needs (`make lab-up` then installs Flux pointed at the fleet repository) | Apply for a session, destroy after |
 
 Defaults to Sweden Central. Design and decisions: [shadewright.io](https://shadewright.io).
@@ -79,6 +79,25 @@ The executor opens PRs and issues in the fleet repository as a GitHub App, whose
 
    Expect your App's name, the four write permissions (contents, pull requests, issues, checks) plus metadata, no events, and one installation with `selected` repositories.
 
+## Model API keys
+
+The Anthropic and OpenAI API keys of the lab are kept as secrets in the foundation's Key Vault, `anthropic-api-key` and `openai-api-key` (the names are in `terraform -chdir=foundation output key_vault`, field `model_key_secrets`). Terraform never holds the values: it only gives you, the operator running it, the role `Key Vault Secrets Officer` on the vault, and you set each secret once by hand, as with the GitHub App key. Nothing else can read them: the executor's role has one data action, sign, on the one key, and the analyzer has no role on the vault.
+
+Set a secret from a file, so the value is on no command line and not in the output (`--query id -o tsv` prints only the secret's ID), then delete the file:
+
+```bash
+KV=$(terraform -chdir=foundation output -json key_vault | jq -r .name)
+az keyvault secret set --vault-name "$KV" --name anthropic-api-key --file ~/path/to/anthropic.key \
+  --encoding utf-8 --query id -o tsv
+az keyvault secret set --vault-name "$KV" --name openai-api-key --file ~/path/to/openai.key \
+  --encoding utf-8 --query id -o tsv
+rm ~/path/to/anthropic.key ~/path/to/openai.key
+```
+
+To rotate, make a new key at the vendor, run the same `az keyvault secret set` (it adds a new version, the old one stays until you disable it), then revoke the old key at the vendor. A lab run reads the current version.
+
+`LAB_MODEL_KEYS_FROM_VAULT=true make lab-up` (also `make lab-flux`) downloads the Anthropic secret into a private temporary file (`az keyvault secret download --file`), uses it as `LAB_ANTHROPIC_KEY_FILE` (see "Model API key" below) and removes the file when the script exits. The value is never read into a shell variable, never on a command line and never printed. A missing secret or a refused read (no `az login`, a network outside `admin_ip_cidrs`) stops `up` before anything is billed, and the message names the variable and the secret. Setting both `LAB_MODEL_KEYS_FROM_VAULT` and `LAB_ANTHROPIC_KEY_FILE` is an error. The OpenAI secret is read the same way, into `LAB_OPENAI_KEY_FILE`, and becomes the Secret `shadewright-openai` that the fleet's `openai` variant reads (see "Model provider"). With `LAB_MODEL_PROVIDER` set to `anthropic` or `openai` the matching secret must be in the vault.
+
 ## Lab session
 
 The `lab` root reads the foundation's outputs from its state and creates the AKS cluster, the federated
@@ -116,6 +135,7 @@ make lab-down YES=1  # destroy without asking
 | `make lab-plan` | `terraform plan` of `lab`, nothing saved | No |
 | `make lab-up` | Saves a plan, prints it with a count of creates, updates and deletes (and names every delete or replace), prices the lab, asks; applies exactly the saved plan after a typed `yes`, then installs Flux when `flux_enabled` (see "Flux") | After `yes` |
 | `make lab-flux` | Only the Flux step of `lab-up`, on a cluster that is up and has `flux_enabled = true`; asks for `yes` | In the cluster only |
+| `make lab-provider` | Switches a running lab to the provider in `LAB_MODEL_PROVIDER` without a Terraform apply or a fleet commit (see "Model provider"); asks for `yes` | In the cluster only |
 | `make lab-down` | Saves a destroy plan of `lab`, prints it, asks; applies it after a typed `yes`, then runs `lab-check` | After `yes` |
 | `make lab-cost` | Price per hour, per session and per month from the Azure Retail Prices API (public, no login) | No |
 | `make lab-check` | Lists every resource in the subscription by group: lab, foundation, bootstrap, other. Fails while a lab resource group or resource remains, or when anything billed by the hour (VMs, disks, public IPs, load balancers, clusters, NAT gateways, ...) exists outside the lab | No |
@@ -167,10 +187,45 @@ change to `scripts/flux.env`, together with the fleet's `scripts/tools.env`: `sc
 bump the fleet first. A lab applied with the AKS extension (before this change) must be destroyed first
 (`make lab-down`); applying this version on top would destroy the extension and its configuration in the plan.
 
+### Model provider
+
+The agent can run against three model providers, one after another in the same lab session: Microsoft Foundry
+(`foundry`, the default, the analyzer's workload identity, no key), the Anthropic API (`anthropic`) and the OpenAI API
+through the OpenAI-compatible provider (`openai`, ADR-0042 in the operator repository). `LAB_MODEL_PROVIDER` picks one.
+Anything else is an error before anything is billed. The fleet holds one variant per provider
+(`infrastructure/shadewright-lab/<provider>` and `.../shadewright-lab-config/<provider>`), and switching is a command,
+not a fleet commit.
+
+```bash
+LAB_MODEL_PROVIDER=anthropic LAB_MODEL_KEYS_FROM_VAULT=true make lab-up    # start the session on Anthropic
+LAB_MODEL_PROVIDER=openai make lab-provider                               # switch the running lab to OpenAI
+LAB_MODEL_PROVIDER=foundry make lab-provider                              # and back; foundry needs no key
+```
+
+How it works: the lab script writes the ConfigMap `lab-model-provider` (key `MODEL_PROVIDER`) in `flux-system`. The root
+Kustomization `lab` reads it as an optional `substituteFrom` and substitutes `${MODEL_PROVIDER:=foundry}` in the path of
+the fleet's Flux Kustomizations `shadewright` and `shadewright-config` (the fleet's README, "Model provider"). With no
+ConfigMap the default is `foundry`.
+
+- `make lab-up` and `make lab-flux` write the ConfigMap with the Flux step. `lab-up` refuses `anthropic` or `openai`
+  before the plan when the key file of that provider is not set (`LAB_ANTHROPIC_KEY_FILE` or `LAB_OPENAI_KEY_FILE`, or
+  `LAB_MODEL_KEYS_FROM_VAULT=true`).
+- `make lab-provider` needs a running lab with `flux_enabled`. After a `yes` it creates the key Secrets from the key
+  variables when they are set, refuses `anthropic` or `openai` when that provider's Secret is not in the cluster (only a
+  definite not-found counts as absent; any other failed read is an error to retry), writes the ConfigMap, asks Flux to
+  reconcile `lab`, then `shadewright` and `shadewright-config`, waits for all three to be Ready and for the analyzer to
+  roll out, and prints the provider read back from the cluster (the `RemediationSettings`, not the request). It fails
+  when the cluster shows another provider. It is safe to repeat.
+
+The `openai` variant needs a chart release that has the OpenAI-compatible provider; the fleet pins v0.5.0 today, which
+has not (the fleet's README says when it can be used). Until then `lab-provider` for `openai` stops at the HelmRelease
+not becoming Ready and says so.
+
 ### Model API key
 
 The analyzer can call the Anthropic API instead of Microsoft Foundry (ADR-0037 in the operator repository). That API
-takes a static key, and `make lab-up` can put it into the cluster, from a file outside every repository:
+takes a static key, and `make lab-up` can put it into the cluster, from a file outside every repository (or from the
+Key Vault, see "Model API keys" above):
 
 ```bash
 LAB_ANTHROPIC_KEY_FILE=~/path/to/anthropic.key make lab-up    # also read by make lab-flux
@@ -187,6 +242,52 @@ when the lab is no longer needed: the limit bounds what a leaked key can cost, t
 When `lab-check` fails after `lab-down`, it names what is left. Run `make lab-down` again (a destroy interrupted
 half way leaves state behind); for a resource outside the state, delete it in the portal or with `az` after
 checking it is yours.
+
+## External analyzers
+
+The analysis store can also hold records of analyzers on clusters outside the lab. Add an entry to `external_analysis_writers` in `foundation/terraform.tfvars` (see the example file):
+
+```hcl
+external_analysis_writers = {
+  "other" = { principal_id = "<object ID of the identity that writes>" }
+}
+```
+
+Each key gets a private container `analyses-<key>` (output `external_analysis_containers`) and the "Shadewright analysis writer" role on that container only. The role allows creating blobs (`blobs/write`, `blobs/add/action`); it has no read, list or delete. The same retention applies, and the lab admin reads the container through the existing Storage Blob Data Contributor assignment on the account. The default `{}` changes nothing.
+
+The storage firewall (default action Deny, no bypass) admits the lab subnet and `admin_ip_cidrs`. An analyzer elsewhere also needs its public outbound IPv4 addresses in `egress_ips`; each is added to the account's IP rules (duplicates are merged). Nothing else is opened: default action, bypass and public network access stay as they are.
+
+```hcl
+external_analysis_writers = {
+  "other" = {
+    principal_id = "<object ID of the identity that writes>"
+    egress_ips   = ["<public outbound IPv4 address of that cluster>"]
+  }
+}
+```
+
+Each address must be a single public IPv4 address without a prefix: Azure Storage takes `/31` and `/32` ranges only as bare addresses, and this variable accepts no ranges. Private (RFC 1918), shared, loopback, link-local, multicast and other reserved addresses are refused at plan time.
+
+When the writer's node subnet has a Storage service endpoint (`Microsoft.Storage` or `Microsoft.Storage.Global`), its traffic reaches the account through the virtual network, not from the public address, so an IP rule cannot match and every write is refused with 403 `AuthorizationFailure`. List the subnet's resource ID in `subnet_ids`; each ID is added as a virtual network rule next to the lab subnet (duplicates merged, sorted). The subnet must have the endpoint. `egress_ips` keeps working as before and the default `[]` adds nothing.
+
+```hcl
+external_analysis_writers = {
+  "other" = {
+    principal_id = "<object ID of the identity that writes>"
+    subnet_ids   = ["/subscriptions/<subscription ID>/resourceGroups/<resource group>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<node subnet>"]
+  }
+}
+```
+
+For a subnet in another subscription, the identity that applies `foundation/` needs `Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action` on that subnet (for example through the Network Contributor role there, or a custom role with that action), or the apply fails.
+
+Limits, from Microsoft Learn "Guidelines and limitations for the Azure Storage firewall":
+
+- An IP rule works only for a cluster in a different Azure region than the storage account. It has no effect on requests from the same region, and not from its paired region when the cluster's subnet has a storage service endpoint. Such a cluster needs `subnet_ids` (below).
+- An outbound address managed by the cluster's load balancer is replaced when the cluster is recreated. Update `egress_ips` then, or the writer is refused.
+- A storage account takes at most 400 IP rules.
+
+`make test` runs plan-only tests of these entries on a mocked provider (`foundation/tests/`).
 
 ## Troubleshooting
 

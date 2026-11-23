@@ -42,6 +42,8 @@ output "key_vault" {
     uri  = azurerm_key_vault.this.vault_uri
     # Name of the GitHub App key to import (README "GitHub App key").
     github_app_key = local.github_app_key
+    # Names of the model API secrets to set by hand (README "Model API keys").
+    model_key_secrets = local.model_key_secrets
   }
 }
 
@@ -59,6 +61,11 @@ output "analysis_store" {
     container = azurerm_storage_container.analyses.name
     url       = azurerm_storage_account.analyses.primary_blob_endpoint
   }
+}
+
+output "external_analysis_containers" {
+  description = "Container per external analyzer key."
+  value       = { for k, c in azurerm_storage_container.external_analyses : k => c.name }
 }
 
 output "vnet" {

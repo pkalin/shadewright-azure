@@ -15,6 +15,12 @@ locals {
 
   # The one key in the vault (ADR-0006); README "GitHub App key" imports it under this name.
   github_app_key = "github-app"
+
+  # Secrets set by hand, never in Terraform or its state (README "Model API keys").
+  model_key_secrets = {
+    anthropic = "anthropic-api-key"
+    openai    = "openai-api-key"
+  }
 }
 
 resource "azurerm_resource_group" "this" {

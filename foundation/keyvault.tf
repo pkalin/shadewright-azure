@@ -1,6 +1,7 @@
-# Holds the GitHub App private key as a non-exportable key (ADR-0006). Terraform never sees the key: import it
-# once by hand, see README "GitHub App key". The vault holds nothing else; the executor's access is still scoped
-# to the one key, so a second key added later is out of its reach.
+# Holds the GitHub App private key as a non-exportable key (ADR-0006) and the lab's model API keys (Anthropic,
+# OpenAI) as secrets. Terraform never sees any of the values: import the key and set the secrets once by hand, see
+# README "GitHub App key" and "Model API keys". The executor still cannot reach the secrets: its custom role has one
+# data action, sign, assigned on the one key. The analyzer has no role on the vault at all.
 #
 # Public endpoint with a firewall (AKS subnet + admin IPs) instead of a private endpoint: same protection
 # for a lab, no monthly charge. Entra ID and Azure RBAC only.
@@ -29,6 +30,16 @@ resource "azurerm_key_vault" "this" {
 resource "azurerm_role_assignment" "kv_crypto_officer_admin" {
   scope                = azurerm_key_vault.this.id
   role_definition_name = "Key Vault Crypto Officer"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# The same operator sets and rotates the model API secrets, and `scripts/lab.sh` reads one as that operator. Secrets
+# Officer is the narrowest built-in role that writes secrets; it cannot touch keys.
+# Price: Azure RBAC has no meter. Key Vault secret operations, Standard tier (Azure Retail Prices API, swedencentral,
+# 2026-11-18): 0.03 USD per 10,000 operations. A few reads and writes a month is about 0.
+resource "azurerm_role_assignment" "kv_secrets_officer_admin" {
+  scope                = azurerm_key_vault.this.id
+  role_definition_name = "Key Vault Secrets Officer"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
