@@ -268,9 +268,22 @@ external_analysis_writers = {
 
 Each address must be a single public IPv4 address without a prefix: Azure Storage takes `/31` and `/32` ranges only as bare addresses, and this variable accepts no ranges. Private (RFC 1918), shared, loopback, link-local, multicast and other reserved addresses are refused at plan time.
 
+When the writer's node subnet has a Storage service endpoint (`Microsoft.Storage` or `Microsoft.Storage.Global`), its traffic reaches the account through the virtual network, not from the public address, so an IP rule cannot match and every write is refused with 403 `AuthorizationFailure`. List the subnet's resource ID in `subnet_ids`; each ID is added as a virtual network rule next to the lab subnet (duplicates merged, sorted). The subnet must have the endpoint. `egress_ips` keeps working as before and the default `[]` adds nothing.
+
+```hcl
+external_analysis_writers = {
+  "other" = {
+    principal_id = "<object ID of the identity that writes>"
+    subnet_ids   = ["/subscriptions/<subscription ID>/resourceGroups/<resource group>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<node subnet>"]
+  }
+}
+```
+
+For a subnet in another subscription, the identity that applies `foundation/` needs `Microsoft.Network/virtualNetworks/subnets/joinViaServiceEndpoint/action` on that subnet (for example through the Network Contributor role there, or a custom role with that action), or the apply fails.
+
 Limits, from Microsoft Learn "Guidelines and limitations for the Azure Storage firewall":
 
-- An IP rule works only for a cluster in a different Azure region than the storage account. It has no effect on requests from the same region, and not from its paired region when the cluster's subnet has a storage service endpoint. A cluster in the same region needs a virtual network rule instead, which this variable does not provide.
+- An IP rule works only for a cluster in a different Azure region than the storage account. It has no effect on requests from the same region, and not from its paired region when the cluster's subnet has a storage service endpoint. Such a cluster needs `subnet_ids` (below).
 - An outbound address managed by the cluster's load balancer is replaced when the cluster is recreated. Update `egress_ips` then, or the writer is refused.
 - A storage account takes at most 400 IP rules.
 
