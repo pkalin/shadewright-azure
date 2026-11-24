@@ -180,7 +180,7 @@ variable "github_app_key_imported" {
 variable "evaluation_github_repository" {
   type        = string
   description = "owner/name of the GitHub repository whose Evaluation workflow may sign in as the evaluation identity."
-  default     = "pkalin/shadewright"
+  default     = "shadewright-labs/shadewright"
 
   validation {
     condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.evaluation_github_repository))
