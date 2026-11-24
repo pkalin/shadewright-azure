@@ -1,6 +1,6 @@
 # A second lab cluster
 
-Design note, 2026-11-14. Tracked in [shadewright#672](https://github.com/pkalin/shadewright/issues/672). It plans
+Design note, 2026-11-14. Tracked in [shadewright#672](https://github.com/shadewright-labs/shadewright/issues/672). It plans
 a second, disposable AKS cluster for the verification rows that the first lab cannot run. Nothing here is built:
 there are no Terraform changes in this note, and the sizes and prices are inputs to a later task.
 
@@ -27,7 +27,7 @@ changed in the web UI or in the raw configuration, and lists the implemented fla
 [`src/flagd/demo.flagd.json`](https://github.com/open-telemetry/opentelemetry-demo/blob/main/src/flagd/demo.flagd.json)
 of the `open-telemetry/opentelemetry-demo` repository (release 3.1.0, 2026-09-18, was the latest on the check date).
 The flags that map to rows of the
-[scenario matrix](https://github.com/pkalin/shadewright-fleet/blob/main/scenarios/MATRIX.md):
+[scenario matrix](https://github.com/shadewright-labs/shadewright-fleet/blob/main/scenarios/MATRIX.md):
 
 | Flag | Service | What the documentation says | Matrix row it can feed |
 | --- | --- | --- | --- |

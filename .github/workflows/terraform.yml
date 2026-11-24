@@ -102,7 +102,7 @@ jobs:
       # test compares them when it finds that file, so fetch it from the fleet's main. A Flux bump therefore lands
       # in the fleet first, and this check fails on this repository until flux.env follows.
       - name: Fetch the fleet's pinned tools
-        run: curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/fleet-tools.env" https://raw.githubusercontent.com/pkalin/shadewright-fleet/main/scripts/tools.env
+        run: curl -fsSL --proto '=https' --retry 3 -o "$RUNNER_TEMP/fleet-tools.env" https://raw.githubusercontent.com/shadewright-labs/shadewright-fleet/main/scripts/tools.env
 
       - name: Offline tests
         run: scripts/lab_test.sh

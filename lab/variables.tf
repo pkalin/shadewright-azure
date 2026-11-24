@@ -62,7 +62,7 @@ variable "flux_enabled" {
 
 variable "fleet_repository_url" {
   type    = string
-  default = "https://github.com/pkalin/shadewright-fleet"
+  default = "https://github.com/shadewright-labs/shadewright-fleet"
 }
 
 variable "fleet_branch" {
